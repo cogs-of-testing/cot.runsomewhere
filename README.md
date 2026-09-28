@@ -1,9 +1,13 @@
-# runsomewhere
+# cot.runsomewhere
 
-Run Python entrypoints somewhere else: threads, subinterpreters, processes,
-remote hosts, containers.
+Run parts of a software system somewhere else, connect them, and deploy them
+where needed: threads, subinterpreters, processes, remote hosts, containers.
 
-Nothing is here yet. The design is being worked out in the first pull request.
+```python
+from cot import runsomewhere as rsh
+```
 
-Prior art and history: the execnet async-core rework,
+Nothing is here yet. The design is in [design/runsomewhere.md](design/runsomewhere.md).
+
+Closest prior idea: execnet and its async-core rework,
 [pytest-dev/execnet#422](https://github.com/pytest-dev/execnet/pull/422).
