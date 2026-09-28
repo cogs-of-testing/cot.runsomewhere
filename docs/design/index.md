@@ -261,8 +261,8 @@ plugins may also crash. The isolation is for state, not hostile code.
 - **Bounded memory.** Each channel has a receiver-granted window; a sender
   waits when it is full.
 - **Three kinds of error:** the other side failed (`RemoteError`, with the
-  remote traceback); the connection is gone (`ChannelClosed`, `WorkerGone`,
-  `HostNotFound`, all `OSError`); you used the API wrong (`StateError`).
+  remote traceback); the connection is gone or was refused (`ChannelClosed`,
+  `WorkerGone`, `HostNotFound`, `HandshakeRefused`, all `OSError`); you used the API wrong (`StateError`).
   Sync-facade timeouts raise the builtin `TimeoutError`.
 - **Skew fails first.** Mismatched runsomewhere versions refuse at handshake,
   before any service runs.
@@ -297,6 +297,7 @@ plugins may also crash. The isolation is for state, not hostile code.
 | [Relaying](relaying.md) | `via`: workers spawned through workers; `proxy`: connections from a worker's vantage point |
 | [Places, interpreters and deployment](deployment.md) | referring to hosts, containers and interpreters; environments; deploying a project |
 | [Bootstrapping](bootstrap.md) | using an existing install; the ladder from stdin and sockets to importable wheels when there is none |
+| [Testing](testing.md) | isolation levels, the in-loop harness `cot.runsomewhere.testing`, fault injection |
 
 
 ## Status and open decisions

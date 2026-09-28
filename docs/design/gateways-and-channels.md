@@ -184,5 +184,6 @@ message instead of a garbled frame.
 | The channel was closed | `ChannelClosed` (an `OSError`) |
 | The worker or the link is gone | `WorkerGone` (an `OSError`) |
 | A place could not be reached at all | `HostNotFound` (an `OSError`) |
+| The other side's protocol or runsomewhere version is incompatible | `HandshakeRefused` (an `OSError`), naming both versions |
 | Wrong use: closed channel, foreign gateway, unknown service | `StateError` |
 | A sync-facade timeout | builtin `TimeoutError` |

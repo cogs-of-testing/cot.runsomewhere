@@ -65,14 +65,16 @@ gives the same structure without that isolation.
 spawning from there.
 
 **Proposed:** the thread host is the default; the subinterpreter host is
-opt-in until it has been measured, and chosen per process:
+opt-in until it has been measured, and chosen when a group is opened:
 
 ```python
-rsh.sync.use_engine(rsh.SubinterpreterEngine())
+with rsh.sync.open_group(engine=rsh.SubinterpreterEngine()) as group:
+    ...
 ```
 
-There is one engine host per process, shared by every facade in it, and
-started on first use.
+`rsh.ThreadEngine()` and `rsh.SubinterpreterEngine()` select a kind of host.
+There is one host of each kind per process, started on first use and shared
+by every group that selects it.
 
 ## The sync facade
 

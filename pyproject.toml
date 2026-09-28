@@ -1,7 +1,26 @@
-# Only the docs tooling for now; packaging arrives with the skeleton.
+# Tooling only for now; packaging arrives with the skeleton.
 [dependency-groups]
 docs = [
   # 2.0 removes the plugin and theme systems mkdocs-material is built on
   "mkdocs>=1.5,<2",
   "mkdocs-material>=9",
 ]
+test = [
+  "anyio>=4",
+  "pytest>=8",
+  "rsh-test-services",
+  "trio>=0.27",
+]
+
+[tool.uv]
+default-groups = [ "test" ]
+
+[tool.uv.workspace]
+members = [ "testing/rsh_test_services" ]
+
+[tool.uv.sources]
+rsh-test-services = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = [ "testing" ]
+norecursedirs = [ "rsh_test_services" ]

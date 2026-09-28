@@ -1,0 +1,41 @@
+import threading
+
+import anyio
+import pytest
+
+from cot import runsomewhere as rsh
+from cot.runsomewhere import testing as rsht
+
+pytestmark = pytest.mark.anyio
+
+
+async def test_the_async_api_through_an_engine_host_is_the_same_api(engine):
+    async with rsh.open_group(engine=engine) as group:
+        async with group.spawn(rsht.InLoop()) as gateway:
+            async with gateway.open("rsh_test_services.echo") as channel:
+                await channel.send("hosted")
+                assert await channel.receive() == "hosted"
+
+
+async def test_protocol_io_keeps_running_while_the_callers_thread_is_blocked(engine):
+    async with rsh.open_group(engine=engine) as group:
+        async with group.spawn(rsht.InLoop()) as gateway:
+            async with gateway.open(
+                "rsh_test_services.produce", count=10, size=1
+            ) as channel:
+                # block the caller's loop outright; the host still reads
+                threading.Event().wait(0.2)
+                assert [item async for item in channel] == [
+                    bytes([index]) for index in range(10)
+                ]
+
+
+async def test_cancellation_crosses_into_the_host(engine):
+    async with rsh.open_group(engine=engine) as group:
+        async with group.spawn(rsht.InLoop()) as gateway:
+            async with gateway.open("rsh_test_services.echo") as channel:
+                with anyio.move_on_after(0.05) as scope:
+                    await channel.receive()
+                assert scope.cancelled_caught
+                await channel.send("after cancel")
+                assert await channel.receive() == "after cancel"

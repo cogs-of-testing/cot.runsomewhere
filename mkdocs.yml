@@ -52,3 +52,4 @@ nav:
     - Relaying: design/relaying.md
     - Places, interpreters and deployment: design/deployment.md
     - Bootstrapping: design/bootstrap.md
+    - Testing: design/testing.md
