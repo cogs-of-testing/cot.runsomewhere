@@ -7,7 +7,7 @@ where needed: threads, subinterpreters, processes, remote hosts, containers.
 from cot import runsomewhere as rsh
 ```
 
-Nothing is here yet. The design is in [design/runsomewhere.md](design/runsomewhere.md).
+Nothing is here yet. The design is in [docs/design/index.md](docs/design/index.md).
 
 Closest prior idea: execnet and its async-core rework,
 [pytest-dev/execnet#422](https://github.com/pytest-dev/execnet/pull/422).
