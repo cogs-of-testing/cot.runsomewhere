@@ -1,0 +1,7 @@
+# Only the docs tooling for now; packaging arrives with the skeleton.
+[dependency-groups]
+docs = [
+  # 2.0 removes the plugin and theme systems mkdocs-material is built on
+  "mkdocs>=1.5,<2",
+  "mkdocs-material>=9",
+]

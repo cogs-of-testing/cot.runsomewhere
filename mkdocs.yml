@@ -1,0 +1,54 @@
+site_name: cot.runsomewhere
+site_description: Run parts of a software system somewhere else, connect them, and deploy them where needed
+site_url: https://github.com/cogs-of-testing/cot.runsomewhere
+repo_url: https://github.com/cogs-of-testing/cot.runsomewhere
+repo_name: cot.runsomewhere
+strict: true
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.details
+  - admonition
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Design:
+    - Overview: design/index.md
+    - API surfaces and engine hosts: design/surfaces.md
+    - Gateways and channels: design/gateways-and-channels.md
+    - Services: design/services.md
+    - Remote exec: design/remote-exec.md
+    - Relaying: design/relaying.md
+    - Places, interpreters and deployment: design/deployment.md
+    - Bootstrapping: design/bootstrap.md
