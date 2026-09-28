@@ -13,24 +13,26 @@ small to be worth a package. It is the built-in service `rsh.remote_exec`,
 and it is **off by default**.
 
 ```python
-gateway = await group.spawn(rsh.Ssh("box"), services={"rsh.remote_exec": True})
-channel = await gateway.remote_exec(source_or_module_or_function, **kwargs)
+async with group.spawn(rsh.Ssh("box"), services={"rsh.remote_exec": True}) as gateway:
+    async with gateway.remote_exec(source_or_module_or_function, **kwargs) as channel:
+        ...
 ```
 
-`remote_exec` returns a channel, connected to the code on the worker.
+`remote_exec` is an async context manager yielding a channel connected to
+the code on the worker; leaving the block closes it.
 
 ## What can be sent
 
 ### A source string
 
 ```python
-channel = await gateway.remote_exec(
+async with gateway.remote_exec(
     """
     import os
     channel.send(sorted(os.listdir("/var/lib/app")))
     """
-)
-entries = await channel.receive()
+) as channel:
+    entries = await channel.receive()
 ```
 
 The string is dedented and run as a fresh module, with `channel` bound in its
@@ -41,7 +43,8 @@ globals. It takes no keyword arguments.
 ```python
 import mypkg.probes.disk
 
-channel = await gateway.remote_exec(mypkg.probes.disk)
+async with gateway.remote_exec(mypkg.probes.disk) as channel:
+    ...
 ```
 
 The module's source, read with `inspect.getsource` on the caller, is run the
@@ -59,7 +62,8 @@ def disk_usage(channel, path):
     channel.send({"total": usage.total, "free": usage.free})
 
 
-channel = await gateway.remote_exec(disk_usage, path="/")
+async with gateway.remote_exec(disk_usage, path="/") as channel:
+    print(await channel.receive())
 ```
 
 The function's source is sent, and the worker defines and calls it with the

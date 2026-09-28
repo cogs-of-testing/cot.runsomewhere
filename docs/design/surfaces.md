@@ -14,9 +14,9 @@ in the caller's own trio or asyncio loop:
 
 ```python
 async with rsh.open_group() as group:
-    gateway = await group.spawn(rsh.Process())
-    async with gateway.open(Agent) as agent:
-        print(await agent.status())
+    async with group.spawn(rsh.Process()) as gateway:
+        async with gateway.open(Agent) as agent:
+            print(await agent.status())
 ```
 
 Here the protocol's IO (reading frames, writing frames, granting credits,
@@ -80,9 +80,9 @@ The external API for code that is not async:
 
 ```python
 with rsh.sync.open_group() as group:
-    gateway = group.spawn(rsh.Ssh("nas"))
-    with gateway.open(Agent) as agent:
-        print(agent.status(timeout=10))
+    with group.spawn(rsh.Ssh("nas")) as gateway:
+        with gateway.open(Agent) as agent:
+            print(agent.status(timeout=10))
 ```
 
 It has the same shape as the core, without `await`. Each call is sent to the

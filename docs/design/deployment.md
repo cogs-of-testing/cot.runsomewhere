@@ -97,9 +97,10 @@ A deployment is a step on a gateway, done once per target, before the workers
 that use it:
 
 ```python
-host = await group.spawn(rsh.Ssh("buildbox"))
-env = await host.deploy(rsh.Deployment(".", roots=["testing"], name="mypkg-ci"))
-workers = [await env.spawn(rsh.Process()) for _ in range(16)]
+async with group.spawn(rsh.Ssh("buildbox")) as host:
+    env = await host.deploy(rsh.Deployment(".", roots=["testing"], name="mypkg-ci"))
+    async with env.spawn(rsh.Process()) as worker:
+        ...
 ```
 
 For a single worker, `group.spawn(place, deploy=deployment)` does the three

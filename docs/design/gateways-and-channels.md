@@ -19,14 +19,16 @@ it, close it.
 
 ```python
 async with rsh.open_group() as group:
-    gateway = await group.spawn(rsh.Process(python="3.12"))
-    gateway.worker.python      # "3.12.9"
-    gateway.worker.pid         # 41327
-    gateway.worker.platform    # "linux-x86_64"
-    gateway.services           # frozenset({"rsh.info", "rsh.via", ...})
+    async with group.spawn(rsh.Process(python="3.12")) as gateway:
+        gateway.worker.python      # "3.12.9"
+        gateway.worker.pid         # 41327
+        gateway.worker.platform    # "linux-x86_64"
+        gateway.services           # frozenset({"rsh.info", "rsh.via", ...})
 ```
 
-`group.spawn` returns the gateway. `gateway.worker` describes what is on the
+`group.spawn` is an async context manager (a plain one on the sync facade):
+it starts the worker, yields its gateway, and closes the gateway when the
+block ends. `gateway.worker` describes what is on the
 far end, as reported in the handshake. The two are separate because they fail
 separately: a gateway can be lost while its worker still runs (a relay in
 between went away), and one worker can be reached through a gateway that
@@ -54,17 +56,17 @@ launch ─► handshake ─► configure ─► serve ─► close ─► closed
    disposition, enabled services, event loop. Configuration never travels
    in argv, where `ps` and `/proc` would show it.
 4. **Serve.** Channels open and close; services run.
-5. **Close.** The group, or `await gateway.aclose()`, asks the worker to shut
-   down. The worker stops its running services, closes their channels, and
+5. **Close.** Leaving the `spawn` block asks the worker to shut down. The worker stops its running services, closes their channels, and
    exits. The caller waits for EOF, then terminates the worker
    and, after a grace period, kills it.
 6. **Gone.** On EOF or a transport error at any point, every open channel
    fails with `WorkerGone`, and the gateway is closed. Nothing reconnects;
    a new worker is a new spawn.
 
-A gateway belongs to exactly one group. Closing the group closes its
-gateways in reverse order of creation, so a worker spawned through another is
-closed before the one it runs through.
+A gateway belongs to exactly one group, and its `spawn` block always ends
+inside the group's. Scopes nest, so a worker spawned through another is closed
+before the one it runs through. If a group's scope is cancelled or fails, it
+closes whatever gateways are still open, in reverse order of creation.
 
 ### Output
 

@@ -17,11 +17,12 @@ byte stream over one channel, and neither looks inside it.
 ## via: workers spawned through a worker
 
 ```python
-host = await group.spawn(rsh.Ssh("buildbox"))
-workers = [await host.spawn(rsh.Process()) for _ in range(16)]
+async with group.spawn(rsh.Ssh("buildbox")) as host:
+    async with host.spawn(rsh.Process()) as worker:
+        ...
 ```
 
-`gateway.spawn(place)` opens a channel to the worker's `rsh.via` service,
+`gateway.spawn(place)`, an async context manager like `group.spawn`, opens a channel to the worker's `rsh.via` service,
 which launches a new worker in `place` *as seen from that worker*: a process
 on the build box, a container on the build box's podman, or another ssh hop
 from there. The new worker's byte stream is carried over that channel, and
@@ -51,8 +52,16 @@ fetching uv, and installing runsomewhere there. What only the caller has, a
 development wheel or a uv binary for another platform, the caller sends along
 in the spawn request.
 
-Chains compose: `await (await host.spawn(rsh.Ssh("inner"))).spawn(rsh.Process())`
-is a worker two hops away. Each hop adds latency, and the caller's gateway
+Chains compose, one block per hop:
+
+```python
+async with group.spawn(rsh.Ssh("outer")) as outer:
+    async with outer.spawn(rsh.Ssh("inner")) as inner:
+        async with inner.spawn(rsh.Process()) as leaf:
+            ...
+```
+
+`leaf` is a worker two hops away. Each hop adds latency, and the caller's gateway
 to the leaf still behaves like any other.
 
 Groups own tunnelled gateways like any other, in reverse order of creation, so
@@ -72,15 +81,14 @@ that can reach a container runtime.
 worker's side and carries the bytes to the caller.
 
 ```python
-gateway = await group.spawn(rsh.Container(name="app-1"), services={"rsh.proxy": True})
+async with group.spawn(rsh.Container(name="app-1"), services={"rsh.proxy": True}) as gateway:
+    # a byte stream to a database only reachable inside the container's network
+    async with gateway.connect("tcp:db:5432") as stream:
+        await stream.send(startup_packet)
 
-# a byte stream to a database only reachable inside the container's network
-async with await gateway.connect("tcp:db:5432") as stream:
-    await stream.send(startup_packet)
-
-# or a local listener, forwarding each accepted connection
-async with gateway.forward(local="tcp:127.0.0.1:15432", remote="tcp:db:5432"):
-    run_migrations("postgresql://127.0.0.1:15432/app")
+    # or a local listener, forwarding each accepted connection
+    async with gateway.forward(local="tcp:127.0.0.1:15432", remote="tcp:db:5432"):
+        run_migrations("postgresql://127.0.0.1:15432/app")
 ```
 
 - Addresses are `tcp:host:port` or `unix:/path`.

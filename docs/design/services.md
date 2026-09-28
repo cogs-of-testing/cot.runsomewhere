@@ -78,9 +78,9 @@ async with gateway.open(Agent, verbose=True) as agent:
 
 `gateway.open` takes either a service name, and yields the channel, or a
 client class, and yields the client wrapping that channel. Leaving the block
-closes it. `open` is only a context manager, never awaitable on its own: a
-channel or client always has a scope that closes it. Code holding several
-opens them in the tasks that use them. Service and client live in the same package, so
+closes it. Like `spawn`, `open` is only an async context manager, never
+awaitable on its own: a gateway, channel or client always has a scope that
+closes it. Code holding several opens each in the task that uses it. Service and client live in the same package, so
 the messages between them are that package's private protocol, versioned and
 tested together, and a caller only sees methods.
 
@@ -90,9 +90,9 @@ call yields a sync wrapper, which runs each method in the engine host
 
 ```python
 with rsh.sync.open_group() as group:
-    gateway = group.spawn(rsh.Ssh("nas"))
-    with gateway.open(Agent, verbose=True) as agent:
-        print(agent.status())
+    with group.spawn(rsh.Ssh("nas")) as gateway:
+        with gateway.open(Agent, verbose=True) as agent:
+            print(agent.status())
 ```
 
 The built-in services are reached through clients too, which is why they
@@ -117,7 +117,8 @@ Names starting with `rsh.` are reserved.
 The caller decides, per worker at spawn, which services are enabled:
 
 ```python
-gateway = await group.spawn(rsh.Ssh("box"), services={"rsh.remote_exec": True})
+async with group.spawn(rsh.Ssh("box"), services={"rsh.remote_exec": True}) as gateway:
+    ...
 ```
 
 Declared application services are on unless the caller turns them off the

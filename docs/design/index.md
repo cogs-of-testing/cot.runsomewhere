@@ -63,8 +63,9 @@ wheel and extra file trees, sent diff-only on repeat.
 **Worker**: a runsomewhere interpreter running in a place and environment. It
 offers the services declared in its environment.
 
-**Gateway**: the link to one worker, over one byte stream. You spawn a worker
-and get its gateway; everything else goes through it
+**Gateway**: the link to one worker, over one byte stream.
+`async with group.spawn(place) as gateway` starts the worker and closes it
+when the block ends; everything else goes through the gateway
 ([gateways and channels](gateways-and-channels.md)).
 
 **Service**: a declared part of the system. Opening it on a gateway calls its
@@ -78,14 +79,16 @@ channels, so a service can hand out further conversations.
 and offers the service's API. Callers use clients; channels are the level
 below.
 
-**Group**: the scope that owns gateways. Closing it closes them in reverse
-order of creation, on success, error or cancellation alike.
+**Group**: the scope gateways are spawned in. Every `spawn`, `open` and
+`remote_exec` is an async context manager, so each resource closes with its
+own block; the group closes whatever is left, in reverse order of creation,
+on success, error or cancellation alike.
 
 ```python
 async with rsh.open_group() as group:
-    gateway = await group.spawn(rsh.Process())
-    async with gateway.open(Runner, root="/srv") as runner:
-        report = await runner.run("testing/test_x.py::test_one")
+    async with group.spawn(rsh.Process()) as gateway:
+        async with gateway.open(Runner, root="/srv") as runner:
+            report = await runner.run("testing/test_x.py::test_one")
 ```
 
 with the service and its client in the same package:
@@ -111,9 +114,9 @@ with the controller feeding work as runners free up.
 
 ```python
 async def runner_loop(group, schedule):
-    gateway = await group.spawn(rsh.Process())
-    async with gateway.open(Runner, root=".") as runner:
-        await drive(runner, schedule)
+    async with group.spawn(rsh.Process()) as gateway:
+        async with gateway.open(Runner, root=".") as runner:
+            await drive(runner, schedule)
 
 
 async with rsh.open_group() as group, anyio.create_task_group() as tg:
@@ -130,17 +133,17 @@ reports.
 
 ```python
 async def runner_loop(env, schedule):
-    gateway = await env.spawn(rsh.Process())
-    async with gateway.open(Runner, root=env.paths.root) as runner:
-        await drive(runner, schedule)
+    async with env.spawn(rsh.Process()) as gateway:
+        async with gateway.open(Runner, root=env.paths.root) as runner:
+            await drive(runner, schedule)
 
 
 async with rsh.open_group() as group:
-    host = await group.spawn(rsh.Ssh("buildbox"))
-    env = await host.deploy(rsh.Deployment(".", roots=["testing"]))
-    async with anyio.create_task_group() as tg:
-        for _ in range(16):
-            tg.start_soon(runner_loop, env, schedule)
+    async with group.spawn(rsh.Ssh("buildbox")) as host:
+        env = await host.deploy(rsh.Deployment(".", roots=["testing"]))
+        async with anyio.create_task_group() as tg:
+            for _ in range(16):
+                tg.start_soon(runner_loop, env, schedule)
 ```
 
 The box has no install of the project yet, so this is the concession path:
@@ -160,10 +163,10 @@ places = [rsh.Process(python=v) for v in ["3.10", "3.12", "3.14"]] + [
 ]
 async with rsh.open_group() as group:
     for place in places:
-        gateway = await group.spawn(place, deploy=rsh.Deployment("."))
-        async with gateway.open(Session) as session:
-            async for report in session.reports():
-                show(place, report)
+        async with group.spawn(place, deploy=rsh.Deployment(".")) as gateway:
+            async with gateway.open(Session) as session:
+                async for report in session.reports():
+                    show(place, report)
 ```
 
 One service, one deployment, six places. uv provisions and caches the
@@ -178,9 +181,9 @@ applying changes. A script drives it, with no event loop in sight:
 ```python
 with rsh.sync.open_group() as group:
     for name in ["nas", "router", "pi"]:
-        gateway = group.spawn(rsh.Ssh(name, python="/opt/fleet/bin/python"))
-        with gateway.open(Agent) as agent:
-            print(name, agent.status())
+        with group.spawn(rsh.Ssh(name, python="/opt/fleet/bin/python")) as gateway:
+            with gateway.open(Agent) as agent:
+                print(name, agent.status())
 ```
 
 Each host has the agent installed, so the worker starts from that install and
@@ -200,18 +203,19 @@ def listing(channel, path):
     return sorted(os.listdir(path))
 
 
-gateway = await group.spawn(rsh.Ssh("nas"), services={"rsh.remote_exec": True})
-channel = await gateway.remote_exec(listing, path="/var/lib/app")
-print(await channel.wait_closed())
+async with rsh.open_group() as group:
+    async with group.spawn(rsh.Ssh("nas"), services={"rsh.remote_exec": True}) as gateway:
+        async with gateway.remote_exec(listing, path="/var/lib/app") as channel:
+            print(await channel.wait_closed())
 ```
 
 ### Diagnostics inside a running container
 
 ```python
 async with rsh.open_group() as group:
-    gateway = await group.spawn(rsh.Container(name="app-1"))
-    async with gateway.open(Diagnostics) as diag:
-        print(await diag.connections())
+    async with group.spawn(rsh.Container(name="app-1")) as gateway:
+        async with gateway.open(Diagnostics) as diag:
+            print(await diag.connections())
 ```
 
 `Container(name=...)` execs into a container that is already running, without
@@ -223,9 +227,9 @@ along if missing.
 
 ```python
 async with rsh.open_group() as group:
-    gateway = await group.spawn(rsh.Subinterpreter())
-    async with gateway.open(PluginHost, paths=plugin_paths) as plugins:
-        await plugins.load_all()
+    async with group.spawn(rsh.Subinterpreter()) as gateway:
+        async with gateway.open(PluginHost, paths=plugin_paths) as plugins:
+            await plugins.load_all()
 ```
 
 The plugin subsystem gets its own modules and globals, and plugins that mutate
