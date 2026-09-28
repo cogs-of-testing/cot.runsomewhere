@@ -81,7 +81,9 @@ that can reach a container runtime.
 worker's side and carries the bytes to the caller.
 
 ```python
-async with group.spawn(rsh.Container(name="app-1"), services={"rsh.proxy": True}) as gateway:
+async with group.spawn(
+    rsh.Container(name="app-1"), services={"rsh.proxy": True}
+) as gateway:
     # a byte stream to a database only reachable inside the container's network
     async with gateway.connect("tcp:db:5432") as stream:
         await stream.send(startup_packet)

@@ -153,9 +153,12 @@ queued without limit.
 Closing the channel from the caller, closing the client, or closing the
 gateway stops a call:
 
-- an async handler is cancelled;
-- a sync handler sees `ChannelClosed` on its next channel operation, and is
-  expected to return. A thread cannot be killed from outside.
+- an async handler waiting on its channel sees the close (its receive raises
+  `ChannelClosed`, its iteration ends); one busy with anything else is
+  cancelled;
+- a sync handler is never cancelled: it sees `ChannelClosed` on its next
+  channel operation, and is expected to return. A thread cannot be killed from
+  outside.
 
 A sync handler that ignores its closed channel keeps the worker from exiting
 cleanly, and the gateway's close escalates to terminating and then killing

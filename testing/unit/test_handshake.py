@@ -5,14 +5,14 @@ from cot.runsomewhere._handshake import Hello, check_peer
 
 
 def hello(version="1.4.2", protocol=1, **overrides):
-    fields = dict(
-        protocol=protocol,
-        version=version,
-        python="3.12.9",
-        platform="linux-x86_64",
-        pid=4242,
-        services=frozenset({"rsh.info", "rsh.via"}),
-    )
+    fields = {
+        "protocol": protocol,
+        "version": version,
+        "python": "3.12.9",
+        "platform": "linux-x86_64",
+        "pid": 4242,
+        "services": frozenset({"rsh.info", "rsh.via"}),
+    }
     fields.update(overrides)
     return Hello(**fields)
 

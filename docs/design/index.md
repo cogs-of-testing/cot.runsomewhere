@@ -47,11 +47,11 @@ sent by the caller runs only on a worker where the caller enabled
 
 ```python
 rsh.Thread()
-rsh.Subinterpreter()                             # Python 3.14+
+rsh.Subinterpreter()  # Python 3.14+
 rsh.Process(python="3.10")
 rsh.Ssh("box", python="3.13")
-rsh.Container("fedora:44", runtime="podman")     # fresh container
-rsh.Container(name="db-1", runtime="podman")     # exec into a running one
+rsh.Container("fedora:44", runtime="podman")  # fresh container
+rsh.Container(name="db-1", runtime="podman")  # exec into a running one
 ```
 
 **Environment**: what is installed where the worker runs. Preferably an
@@ -204,7 +204,9 @@ def listing(channel, path):
 
 
 async with rsh.open_group() as group:
-    async with group.spawn(rsh.Ssh("nas"), services={"rsh.remote_exec": True}) as gateway:
+    async with group.spawn(
+        rsh.Ssh("nas"), services={"rsh.remote_exec": True}
+    ) as gateway:
         async with gateway.remote_exec(listing, path="/var/lib/app") as channel:
             print(await channel.wait_closed())
 ```

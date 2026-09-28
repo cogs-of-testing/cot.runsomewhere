@@ -1,0 +1,37 @@
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v6.0.0
+  hooks:
+    - id: check-toml
+    - id: check-yaml
+    - id: end-of-file-fixer
+    - id: trailing-whitespace
+
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.16.9
+  hooks:
+    - id: ruff-check
+      args: [ --fix, --show-fixes ]
+    - id: ruff-format
+
+- repo: https://github.com/pre-commit/mirrors-mypy
+  rev: v2.3.1
+  hooks:
+    - id: mypy
+      # checks what [tool.mypy] names, not the staged files alone
+      pass_filenames: false
+      additional_dependencies:
+        - anyio>=4.10
+        - exceptiongroup
+        - pytest
+        - sniffio
+
+- repo: https://github.com/zizmorcore/zizmor-pre-commit
+  rev: v1.30.1
+  hooks:
+    - id: zizmor
+
+- repo: https://github.com/scientific-python/cookie
+  rev: 2026.08.14
+  hooks:
+    - id: sp-repo-review

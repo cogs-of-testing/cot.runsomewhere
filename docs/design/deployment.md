@@ -151,8 +151,10 @@ for a given time.
 The caller knows local paths; the deployed tree lives elsewhere.
 
 ```python
-env.paths.translate("testing/test_x.py")   # "/home/ci/.local/share/.../testing/test_x.py"
-env.paths.root                             # the remote workspace
+env.paths.translate(
+    "testing/test_x.py"
+)  # "/home/ci/.local/share/.../testing/test_x.py"
+env.paths.root  # the remote workspace
 ```
 
 A caller hands services remote paths, never local ones.

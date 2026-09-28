@@ -60,9 +60,10 @@ interpreter is busy with CPU-bound work or a long C call, so one slow caller
 cannot stall a worker's tunnel, or every worker behind a relay. A thread host
 gives the same structure without that isolation.
 
-**To verify:** anyio with trio and with asyncio runs in a
-`concurrent.interpreters` subinterpreter, including sockets and subprocess
-spawning from there.
+Verified on Python 3.14: anyio's asyncio backend runs in a
+`concurrent.interpreters` subinterpreter, with threads and sockets, and the
+host runs in-loop workers with entry-point services there. **To verify:** trio
+in a subinterpreter, and spawning worker processes from one.
 
 **Proposed:** the thread host is the default; the subinterpreter host is
 opt-in until it has been measured, and chosen when a group is opened:

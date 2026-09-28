@@ -51,7 +51,7 @@ def same(a, b):
         return {(type(k), k) for k in a} == {(type(k), k) for k in b} and all(
             same(a[k], b[k]) for k in a
         )
-    return a == b or (a != a and b != b)
+    return a == b or (math.isnan(a) and math.isnan(b))
 
 
 @pytest.mark.parametrize("value", SENDABLE, ids=repr)

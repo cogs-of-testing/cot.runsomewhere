@@ -20,10 +20,10 @@ it, close it.
 ```python
 async with rsh.open_group() as group:
     async with group.spawn(rsh.Process(python="3.12")) as gateway:
-        gateway.worker.python      # "3.12.9"
-        gateway.worker.pid         # 41327
-        gateway.worker.platform    # "linux-x86_64"
-        gateway.services           # frozenset({"rsh.info", "rsh.via", ...})
+        gateway.worker.python  # "3.12.9"
+        gateway.worker.pid  # 41327
+        gateway.worker.platform  # "linux-x86_64"
+        gateway.services  # frozenset({"rsh.info", "rsh.via", ...})
 ```
 
 `group.spawn` is an async context manager (a plain one on the sync facade):
@@ -92,10 +92,10 @@ one gateway. Values are `None`, `bool`, `int`, `float`, `complex`, `str`,
 `bytes`, `tuple`, `list`, `dict`, `set`, `frozenset`, and channels.
 
 ```python
-async with gateway.open("fleet.agent", verbose=True) as ch:   # a service, see services
+async with gateway.open("fleet.agent", verbose=True) as ch:  # a service, see services
     await ch.send({"op": "status"})
     reply = await ch.receive()
-    async for item in ch:                                      # until the other side closes
+    async for item in ch:  # until the other side closes
         ...
 ```
 
@@ -111,7 +111,7 @@ existing channel:
 
 ```python
 async def serve(channel):
-    logs = channel.new()          # created here, usable once the peer receives it
+    logs = channel.new()  # created here, usable once the peer receives it
     await channel.send({"logs": logs})
 ```
 

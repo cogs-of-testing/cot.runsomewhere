@@ -63,12 +63,12 @@ test at this level exercises the same code a process worker runs.
 injection:
 
 ```python
-pipe = rsht.Pipe(max_chunk=1)          # deliver one byte per read
+pipe = rsht.Pipe(max_chunk=1)  # deliver one byte per read
 async with group.spawn(rsht.InLoop(pipe=pipe)) as gateway:
     ...
-    pipe.hold()                        # stop delivering, in both directions
+    pipe.hold()  # stop delivering, in both directions
     pipe.release()
-    pipe.cut()                         # EOF on both ends, as a dead worker
+    pipe.cut()  # EOF on both ends, as a dead worker
 ```
 
 - `max_chunk` splits every write into reads of at most that size, which is
@@ -88,9 +88,9 @@ without two installs.
 
 ### pytest plugin
 
-**Proposed:** `cot.runsomewhere.testing` ships a pytest plugin, registered by
-entry point, with one fixture, `rsh_group`: an open group in the test's loop,
-closed at teardown, failing the test if anything was left open.
+`cot.runsomewhere.testing` ships a pytest plugin, registered by entry point,
+with one fixture, `rsh_group`: an open group in the test's loop, closed at
+teardown. **Proposed:** failing the test if anything was left open.
 
 ## Level 0
 

@@ -1,26 +1,107 @@
-# Tooling only for now; packaging arrives with the skeleton.
+[build-system]
+build-backend = "hatchling.build"
+requires = [ "hatch-vcs", "hatchling" ]
+
+[project]
+name = "cot.runsomewhere"
+description = "Run parts of a software system somewhere else, connect them, and deploy them where needed"
+readme = "README.md"
+license = "MIT"
+license-files = [ "LICENSE" ]
+authors = [
+  { name = "Ronny Pfannschmidt", email = "opensource@ronnypfannschmidt.de" },
+]
+requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Framework :: AnyIO",
+  "Framework :: Pytest",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: System :: Distributed Computing",
+]
+dynamic = [ "version" ]
+# runtime dependencies stay pure Python: bootstrapping ships them as wheels
+dependencies = [
+  "anyio>=4.10",
+  "exceptiongroup>=1.2; python_version<'3.11'",
+]
+urls.Documentation = "https://github.com/cogs-of-testing/cot.runsomewhere/tree/main/docs"
+urls.Source = "https://github.com/cogs-of-testing/cot.runsomewhere"
+scripts.runsomewhere = "cot.runsomewhere._cli:main"
+entry-points.pytest11.cot_runsomewhere = "cot.runsomewhere.testing.pytest_plugin"
+
 [dependency-groups]
+dev = [ { include-group = "lint" }, { include-group = "test" } ]
+test = [
+  "pytest>=8",
+  "pytest-timeout>=2.3",
+  "rsh-test-services",
+  "trio>=0.27",
+]
+lint = [
+  "mypy>=1.15",
+  "pre-commit>=4",
+]
 docs = [
   # 2.0 removes the plugin and theme systems mkdocs-material is built on
   "mkdocs>=1.5,<2",
   "mkdocs-material>=9",
 ]
-test = [
-  "anyio>=4",
-  "pytest>=8",
-  "rsh-test-services",
-  "trio>=0.27",
-]
+
+[tool.hatch]
+version.source = "vcs"
+version.raw-options.fallback_version = "0.0.0"
+build.targets.wheel.packages = [ "src/cot" ]
 
 [tool.uv]
-default-groups = [ "test" ]
+default-groups = [ "dev" ]
+workspace.members = [ "testing/rsh_test_services" ]
+sources.rsh-test-services = { workspace = true }
 
-[tool.uv.workspace]
-members = [ "testing/rsh_test_services" ]
+[tool.ruff]
+line-length = 88
+src = [ "src", "testing" ]
+lint.extend-select = [
+  "B",
+  "I",
+  "UP",
+]
+# nested blocks are deliberate: each one is the scope of one resource
+lint.ignore = [ "SIM117" ]
+lint.isort.known-first-party = [ "cot", "rsh_test_services" ]
 
-[tool.uv.sources]
-rsh-test-services = { workspace = true }
+[tool.pytest]
+ini_options.minversion = "8"
+ini_options.addopts = [ "-ra", "--strict-config", "--strict-markers" ]
+ini_options.log_level = "INFO"
+ini_options.testpaths = [ "testing" ]
+ini_options.norecursedirs = [ "rsh_test_services" ]
+ini_options.xfail_strict = true
+ini_options.timeout = 60
+ini_options.filterwarnings = [ "error" ]
 
-[tool.pytest.ini_options]
-testpaths = [ "testing" ]
-norecursedirs = [ "rsh_test_services" ]
+[tool.mypy]
+python_version = "3.10"
+files = [ "src" ]
+strict = true
+warn_unreachable = true
+enable_error_code = [ "ignore-without-code", "redundant-expr", "truthy-bool" ]
+
+[tool.repo-review]
+# not adopted yet: each adds a tool or service the project has not chosen
+ignore = [
+  "GH200",  # Dependabot
+  "PC160",  # spell checker
+  "PC170",  # pygrep hooks, for rST
+  "PC180",  # markdown formatter
+  "PC901",  # pre-commit.ci
+  "PC902",
+  "PC903",
+  "PY007",  # task runner
+]

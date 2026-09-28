@@ -49,11 +49,16 @@ async def test_an_item_larger_than_the_window_still_arrives():
 
 
 async def test_a_slow_consumer_on_one_channel_does_not_stall_another():
+    async def echo(channel):
+        async for item in channel:
+            await channel.send(item)
+
     sent = []
-    async with inloop(services={"t.produce": counting_producer(sent)}) as gateway:
+    services = {"t.produce": counting_producer(sent), "t.echo": echo}
+    async with inloop(services=services) as gateway:
         async with gateway.open("t.produce"):
             await anyio.wait_all_tasks_blocked()
-            async with gateway.open("rsh_test_services.echo") as echo:
+            async with gateway.open("t.echo") as echo:
                 await echo.send("through")
                 with anyio.fail_after(1):
                     assert await echo.receive() == "through"

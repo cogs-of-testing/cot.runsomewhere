@@ -17,7 +17,7 @@ it is, and bootstraps nothing:
 
 ```python
 rsh.Ssh("app-host", python="/opt/app/.venv/bin/python")
-rsh.Container("registry.example/app:1.4")        # image built with its services
+rsh.Container("registry.example/app:1.4")  # image built with its services
 rsh.Process(python="/opt/app/.venv/bin/python")
 ```
 

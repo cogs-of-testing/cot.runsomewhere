@@ -106,9 +106,16 @@ def wrong_first_parameter(chan):
         (closure_factory(), {}, ValueError, "closure"),
         (uses_global, {}, ValueError, "GLOBAL"),
         ("channel.send(1)", {"value": 1}, TypeError, "keyword"),
-        (double, {"value": object()}, TypeError, ""),
+        (double, {"value": object()}, TypeError, "object"),
     ],
-    ids=["lambda", "first-param", "closure", "global", "kwargs-to-source", "unsendable"],
+    ids=[
+        "lambda",
+        "first-param",
+        "closure",
+        "global",
+        "kwargs-to-source",
+        "unsendable",
+    ],
 )
 async def test_unrunnable_code_is_refused_before_sending(code, kwargs, error, message):
     async with inloop(enable=ENABLED) as gateway:
