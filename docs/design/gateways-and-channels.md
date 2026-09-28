@@ -136,7 +136,7 @@ as the result, which the caller reads with `await channel.wait_closed()`.
 ### Flow control
 
 Every channel has a window granted by the receiver. A sender whose window is
-exhausted waits (async) or blocks (blocking surface); it never buffers on the
+exhausted waits (async) or blocks (sync facade); it never buffers on the
 far side. The receiver grants more as its consumer takes items.
 
 **Proposed:** the window is counted in bytes of encoded payload, 1 MiB by
@@ -183,4 +183,4 @@ message instead of a garbled frame.
 | The worker or the link is gone | `WorkerGone` (an `OSError`) |
 | A place could not be reached at all | `HostNotFound` (an `OSError`) |
 | Wrong use: closed channel, foreign gateway, unknown service | `StateError` |
-| A blocking-surface timeout | builtin `TimeoutError` |
+| A sync-facade timeout | builtin `TimeoutError` |

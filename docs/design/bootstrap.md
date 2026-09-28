@@ -1,4 +1,4 @@
-# Bootstrapping by uv availability
+# Bootstrapping
 
 *Written by Claude Opus 5.5 via Claude Code for engineers deciding whether
 runsomewhere fits their system; Ronny prompted it, it did the work, Ronny read
@@ -7,156 +7,188 @@ it.*
 Status: design. Decisions marked **proposed** are open for review; anything
 marked **to verify** is an assumption not yet checked.
 
-A worker is runsomewhere itself, installed on the target and started as
-`python -m cot.runsomewhere worker`. Before that command can run, the target
-needs an interpreter and an environment containing the caller's exact version
-of runsomewhere. Bootstrapping is how that gets there. It never ships
-runsomewhere's own code as a script to run: what arrives is a wheel, installed
-the ordinary way.
+## The desired mode: an existing install
 
-uv is the tool that makes this cheap, so the strategy is decided by where uv
-is available: already on the target, obtainable for it, or not at all.
+A worker should start from an environment that already has runsomewhere and
+the system's services installed: a virtual environment deployed with the
+application, a container image built with them, a host provisioned by the
+system's own configuration management. runsomewhere then uses that install as
+it is, and bootstraps nothing:
 
-## Steps
-
-```text
-probe ─► get uv ─► get Python ─► get runsomewhere ─► launch worker ─► handshake
+```python
+rsh.Ssh("app-host", python="/opt/app/.venv/bin/python")
+rsh.Container("registry.example/app:1.4")        # image built with its services
+rsh.Process(python="/opt/app/.venv/bin/python")
 ```
 
-Each step is skipped when the probe shows it is already satisfied.
+The caller runs `<python> -m cot.runsomewhere worker` there, over a
+socketpair, a dial-back socket or stdio (see [below](#the-protocol-stream)).
+The worker finds its services through the entry points of what is installed
+([services](services.md)). If the install's runsomewhere differs from the
+caller's in major or minor version, the handshake refuses, and says so; the
+fix is to update the install, not to paper over it.
 
-### 1. Probe
+This is the mode to design a system for. Installed code is what the system
+tested, versioned and deployed; everything below exists for targets where
+that has not happened yet.
 
-One short POSIX shell script, run over the place's own command channel
-(`ssh host sh -s`, `podman exec -i name sh -s`), prints one `key=value` per
-line:
+The local cases are the same mode:
 
-- `os`, `arch`, and `libc` (glibc version, or musl);
-- `uv`: the first uv found on `PATH`, in `~/.local/bin`, `~/.cargo/bin` or
-  runsomewhere's own cache, with its version;
-- `python`: interpreters on `PATH` with their versions, and the requested one
-  if `python=` named a path;
-- `cache`: runsomewhere's cache directory, and whether it is writable;
-- `runsomewhere`: whether the requested interpreter already has runsomewhere,
-  and its version, from `python -m cot.runsomewhere info`.
+- a local `Process` with no `python=` is the caller's own interpreter and
+  environment, `sys.executable -m cot.runsomewhere worker`;
+- threads and subinterpreters share the caller's environment and start
+  nothing.
 
-The probe is the only shell script runsomewhere sends, it is read-only, and it
-needs nothing beyond `sh`, `uname` and `command -v`.
+## When there is no install: the ladder
 
-### 2. Tiers
+Bootstrapping is a concession, for targets that have a Python but no
+suitable install: a fresh machine, a stock container image, a Python version
+under test. The ladder climbs from what the target has to the same end state
+as the desired mode: the target's Python can import runsomewhere, and the
+services it should offer, from **wheels**, and the worker is started through
+runsomewhere's **entry points**. Only how the wheels get there differs.
 
-The probe decides one of five tiers; lower is cheaper.
+The caller takes the ladder only when asked (`bootstrap=True` on the place,
+**proposed**) or when the place names no interpreter that has an install; an
+interpreter named explicitly that lacks runsomewhere fails the spawn instead of
+being bootstrapped behind the caller's back.
 
-| Tier | Target has | Launch |
-|---|---|---|
-| 0 | the caller's own interpreter (local `Process`, no `python=`) | `sys.executable -m cot.runsomewhere worker` |
-| 1 | an interpreter with runsomewhere at the caller's version | `<python> -m cot.runsomewhere worker` |
-| 2 | uv | `uv run --no-project --python <req> --with <runsomewhere> python -m cot.runsomewhere worker` |
-| 3 | no uv, but a platform uv supports | ship uv, then tier 2 |
-| 4 | no uv and no usable uv build; a Python ≥ 3.10 | ship wheels, `python -m venv`, then tier 1 |
+```text
+  bare Python ──► stub on stdin ──► wheels importable ──► worker ──► uv environment
+      ▲                                                                (when needed)
+  no Python: ship uv, install one
+```
 
-Tier 1 preserves the interpreter exactly, which matters when `sys.executable`
-is part of what is being tested. Tier 2 is the normal case for every remote
-and container place.
+## Rung 0: launch a Python
 
-`--no-project` is load-bearing in tier 2: without it, uv run from a directory
-that contains a `pyproject.toml` syncs *that* project into the worker's
+The place gives runsomewhere one command line on the target: a local
+subprocess, `ssh host`, `podman exec -i`. On it runs
+
+```sh
+python3 -c "<stub>" <transport>
+```
+
+where `<transport>` says where the stub reads from: `stdin`, or an inherited
+socket (`fd:3` for a local socketpair).
+
+The **stub** is the only code ever sent as source during bootstrap. It is
+small (a few dozen lines), stdlib only, runs on every supported Python,
+and is fixed per runsomewhere version: it takes no configuration, so it can
+be reviewed once and then recognised.
+
+If `python3` is not there, see [no Python](#no-python-at-all).
+
+## Rung 1: the stub fetches wheels
+
+The stub speaks a tiny exchange on its stream, before the protocol proper:
+
+1. It sends what it sees: Python version and implementation, platform tags,
+   its cache directory, and which wheels (by sha256) the cache already holds.
+2. The caller answers with the list of wheels this worker needs: runsomewhere
+   and its runtime dependencies at the caller's exact versions, each with name,
+   sha256 and size.
+3. For every wheel the cache lacks, the caller sends exactly `size` bytes. The
+   stub checks the hash, writes to a temporary name, and renames into the
+   cache, so a broken transfer never leaves a half wheel under a real name.
+
+Wheels are cached on the target by hash, so a second worker on the same
+target transfers nothing.
+
+## Rung 2: wheels become importable
+
+**Proposed:** each wheel is unpacked once, into a directory named by its hash,
+and those directories go on `sys.path`. No installer runs and no environment
+is created: an unpacked wheel is already an importable tree, with its
+`.dist-info` next to its packages, so `importlib.metadata` finds its entry
+points.
+
+Unpacked rather than imported from the zip, because packages that read
+`__file__`, and compiled extensions, do not work from inside a zip.
+
+The stub then loads the `worker` entry point from runsomewhere's `.dist-info`
+and calls it with the stream it was reading. From here on it is the worker.
+
+## Rung 3: the worker
+
+The worker starts the protocol handshake on the same stream
+([gateways](gateways-and-channels.md)), and from here on behaves exactly as a
+worker from an existing install.
+
+At this rung the worker offers the services of every wheel it was given. That
+is enough whenever those wheels suit the target's Python and platform: the
+common case for runsomewhere itself, whose runtime dependencies are pure
+Python, and for services that are.
+
+## Rung 4: a uv environment, when needed
+
+Some targets need more than wheels on a path: a different Python than the one
+found, compiled dependencies built for the target, or a
+[deployment](deployment.md) whose lockfile must be applied exactly.
+
+For those, the rung-3 worker becomes the **host worker**, and the environment
+is built from it with uv:
+
+- **uv is a wheel too.** If the target has no uv, the caller sends uv's wheel
+  for the target's platform, the same way as any other; its binary is in the
+  wheel.
+- The host worker runs uv to get the Python (`python=`), create the
+  environment and apply the lockfile, with `uv sync --frozen` or `uv pip
+  install` of the wheels it already has.
+- The workers that run services start inside that environment, spawned
+  through the host worker ([relaying](relaying.md)), and again start from
+  runsomewhere's `worker` entry point.
+
+`uv run` is always given `--no-project`: without it, uv run from a directory
+containing a `pyproject.toml` syncs that project into the worker's
 environment.
 
-### 3. Getting uv onto the target (tier 3)
+## Where the wheels come from
 
-**Proposed:** the caller ships a uv binary, taken from uv's own wheels on
-PyPI, which exist per platform and contain the binary.
+On the caller:
 
-1. The caller picks the uv wheel for the target's `os`, `arch` and `libc`, at
-   the uv version the caller uses itself, so both ends behave alike.
-2. It downloads that wheel once into its cache, keyed by version and
-   platform, and extracts the binary.
-3. It streams the binary to the target's cache over the place's command
-   channel: `head -c <size> > uv.tmp && chmod +x uv.tmp && mv uv.tmp uv`.
-   The exact-length read is load-bearing: it lets the same stream carry the
-   next command afterwards, and a short transfer never leaves a truncated
-   binary under the final name.
-4. Later spawns to the same target find it in step 1.
+- runsomewhere's own wheel: from the index for a released version, or built
+  once from the caller's checkout for a development one, cached by content;
+- its runtime dependencies and uv: resolved and downloaded for the target's
+  platform tags, cached by hash;
+- a service's package and its dependencies: from the deployment's lockfile.
 
-For Linux targets, a musl build is statically linked and runs regardless of
-the target's glibc (**to verify** that uv's musllinux wheels carry a static
-binary). For a container started fresh, the binary is mounted read-only
-instead of streamed: `-v <cache>/uv-<version>-<platform>/uv:/opt/rsh/uv:ro`.
+A caller without network access uses a pre-seeded wheel cache.
 
-A caller without network access uses a pre-seeded cache, or names a uv binary
-per platform in its configuration.
+## No Python at all
 
-### 4. Getting Python
+**Proposed:** the one rung below 0. If the target has a POSIX shell but no
+usable Python, the caller streams uv's binary to it (extracted from uv's wheel
+for that platform) with an exact-length read,
+`head -c <size> > uv.tmp && chmod +x uv.tmp && mv uv.tmp uv`, has uv install a
+Python, and starts at rung 0 with that Python. The exact-length read lets the
+same stream carry the next command, and a short transfer never leaves a
+truncated binary under its final name.
 
-Tiers 2 and 3 get the interpreter from uv: an installed one if it satisfies
-`python=`, otherwise a uv-managed download on the target. A target without
-network access gets the managed interpreter from the caller's own uv cache
-instead, streamed the same way as the uv binary, when the platform matches.
-**Proposed**, since it makes offline targets work but copies ~30 MB per
-interpreter.
+**To verify:** uv's musllinux wheels carry a statically linked binary that
+runs on any Linux of the same architecture.
 
-### 5. Getting runsomewhere
+## The protocol stream
 
-Always the caller's exact version, so the handshake cannot refuse on skew:
-
-- a **released** caller asks for `cot.runsomewhere==<version>` from the
-  index;
-- a **development** caller builds its own wheel once, caches it by version
-  and content, and ships it to the target's cache the same way as the uv
-  binary; `--with <path-to-wheel>` then installs it without an index.
-
-Through a relay ([relaying](relaying.md)), the caller hands the wheel, and
-the uv binary if the leaf needs one, to the relay in the spawn request; the
-relay bootstraps the new worker with them.
-
-### 6. Launch and handshake
-
-The launch command line names the protocol transport and nothing else; the
-configuration follows as the first frame (see
-[gateways](gateways-and-channels.md)). Where the transport can be kept off
-stdio, it is:
+Whichever way a worker started, the handshake runs on the stream it was
+given: version check, then the configuration frame. Where the place allows,
+the protocol then moves off stdio:
 
 | Place | Protocol stream |
 |---|---|
-| local process, POSIX | inherited socketpair |
-| local process, Windows | socket duplicated into the child with `socket.share()`, falling back to stdio where that fails |
+| local process, POSIX | the inherited socketpair, from the start |
+| local process, Windows | a socket duplicated into the child with `socket.share()`, falling back to stdio where that fails |
 | ssh, POSIX | a unix socket forwarded back with `ssh -R`, dialled by the worker |
-| ssh to Windows | stdio |
-| container | stdio |
+| ssh to Windows, container | stdio |
 
-A worker on stdio moves the protocol off fd 0 and 1 before it runs anything
-else.
-
-## Tier 4: no uv at all
-
-**Proposed:** tier 4 exists for platforms uv does not build for and for
-targets whose policy forbids foreign binaries. It works only because of a
-constraint the rest of the design has to keep: **runsomewhere's runtime
-dependencies are pure Python**. The caller then downloads the wheels for
-runsomewhere and its dependencies, ships them, and installs them with the
-target's own `python -m venv` and `pip install --no-index`. It is slow, has
-no interpreter provisioning (`python=` must name one that exists), and cannot
-apply a deployment's lockfile with `uv sync`; a deployment on tier 4 installs
-the lockfile's pinned wheels the same way instead.
-
-## uv on the caller
-
-The caller needs uv for every tier above 1: to build wheels, download uv
-wheels and run locally provisioned processes. It uses the first of:
-
-1. `uv` on `PATH`;
-2. the `uv` Python package in the caller's environment, which ships the
-   binary (**proposed**: an optional extra, `cot.runsomewhere[uv]`).
-
-Without either, only tiers 0 and 1 and in-process places are available, and
-spawning anything else fails with a message naming the missing uv.
+On stdio, the worker moves the protocol off fd 0 and 1 before running
+anything else, so a stray `print` cannot corrupt the stream.
 
 ## What bootstrapping never does
 
-- It never installs anything outside runsomewhere's own cache and workspace
-  directories on the target, never uses `sudo`, and never touches the
-  system Python's packages.
+- It never installs anything outside runsomewhere's cache and workspace
+  directories on the target, never uses `sudo`, and never touches the system
+  Python's packages.
+- It never sends code as source except the fixed stub.
 - It never puts configuration or secrets in a command line.
-- It never guesses: a target the probe cannot classify fails the spawn with
-  the probe's output in the error.
+- It never guesses: a target the stub cannot serve fails the spawn with what
+  the stub reported.

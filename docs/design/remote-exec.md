@@ -86,7 +86,7 @@ imports there, from the worker's environment.
 
 ## Running
 
-- Sent code runs on a worker thread of its own, and uses the blocking channel
+- Sent code runs on a worker thread of its own, and uses the sync channel
   API. An `async def` function runs as a task on the worker's event loop
   instead, and uses the async channel API.
 - When the code finishes, the channel closes. A function's return value

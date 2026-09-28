@@ -82,12 +82,12 @@ closes it. Service and client live in the same package, so
 the messages between them are that package's private protocol, versioned and
 tested together, and a caller only sees methods.
 
-**Proposed:** clients are written once, async. On the blocking surface the
-same call yields a blocking wrapper, which runs each method on the engine
-thread:
+**Proposed:** clients are written once, async. On the sync facade the same
+call yields a sync wrapper, which runs each method in the engine host
+([surfaces](surfaces.md)):
 
 ```python
-with rsh.blocking.open_group() as group:
+with rsh.sync.open_group() as group:
     gateway = group.spawn(rsh.Ssh("nas"))
     with gateway.open(Agent, verbose=True) as agent:
         print(agent.status())
@@ -129,7 +129,7 @@ caller's code says it needs them.
   trio or asyncio, chosen per worker at spawn (`loop="trio"`); an async
   handler is written for that loop, or against anyio to run on either.
 - A **sync** handler runs on a worker thread of its own and uses the
-  blocking channel API.
+  sync channel API.
 
 **Proposed:** a sync handler that must own the worker's main thread (signal
 handlers, some GUI and C libraries) says so at its definition,

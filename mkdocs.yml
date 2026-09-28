@@ -45,6 +45,7 @@ nav:
   - Home: index.md
   - Design:
     - Overview: design/index.md
+    - API surfaces and engine hosts: design/surfaces.md
     - Gateways and channels: design/gateways-and-channels.md
     - Services: design/services.md
     - Remote exec: design/remote-exec.md

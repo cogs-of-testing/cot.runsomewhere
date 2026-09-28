@@ -54,10 +54,11 @@ rsh.Container("fedora:44", runtime="podman")     # fresh container
 rsh.Container(name="db-1", runtime="podman")     # exec into a running one
 ```
 
-**Environment**: what is installed where the worker runs. Threads and
-subinterpreters share the caller's. Everywhere else it is the caller's own
-environment, one provisioned by uv from requirements, or a **Deployment**: your
-project's lockfile, its wheel and extra file trees, sent diff-only on repeat.
+**Environment**: what is installed where the worker runs. Preferably an
+existing install that already has runsomewhere and your services, used as it
+is. Threads and subinterpreters share the caller's. Otherwise one provisioned
+by uv from requirements, or a **Deployment**: your project's lockfile, its
+wheel and extra file trees, sent diff-only on repeat.
 
 **Worker**: a runsomewhere interpreter running in a place and environment. It
 offers the services declared in its environment.
@@ -140,8 +141,9 @@ async with rsh.open_group() as group, AsyncExitStack() as stack:
     ]
 ```
 
-The box needs a POSIX shell and a platform uv builds for; uv, Python and
-runsomewhere are brought along when missing ([bootstrapping](bootstrap.md)).
+The box has no install of the project yet, so this is the concession path:
+it needs a Python, and runsomewhere, its dependencies and uv arrive as wheels
+([bootstrapping](bootstrap.md)).
 The deployment carries the lockfile, the project's wheel and the test tree,
 and a second deploy sends only what changed ([deployment](deployment.md)). All
 sixteen workers are spawned through the build box's worker, over one ssh
@@ -172,15 +174,17 @@ A long-lived service on each machine of a fleet, answering queries and
 applying changes. A script drives it, with no event loop in sight:
 
 ```python
-with rsh.blocking.open_group() as group:
+with rsh.sync.open_group() as group:
     for name in ["nas", "router", "pi"]:
-        with group.spawn(rsh.Ssh(name)).open(Agent) as agent:
+        gateway = group.spawn(rsh.Ssh(name, python="/opt/fleet/bin/python"))
+        with gateway.open(Agent) as agent:
             print(name, agent.status())
 ```
 
-The agent's client is its interface; the script calls methods, it does not
-parse shell output. The blocking surface is the async API without `await`,
-plus `timeout=`.
+Each host has the agent installed, so the worker starts from that install and
+nothing is bootstrapped. The agent's client is its interface; the script
+calls methods, it does not parse shell output. The sync facade is the async
+API without `await`, plus `timeout=` ([surfaces](surfaces.md)).
 
 ### Poking at a host
 
@@ -242,9 +246,10 @@ plugins may also crash. The isolation is for state, not hostile code.
   `rsh.can_send(x)` checks without sending.
 - **Nothing outlives its group.** No global state, no default group, no atexit
   hooks.
-- **trio, asyncio or plain threads.** The async API detects the running loop.
-  On async surfaces cancellation comes from your own scope, so there is no
-  `timeout=`.
+- **Async core, sync facade.** The core API is async and runs in your own trio
+  or asyncio loop, with cancellation from your own scope and no `timeout=`.
+  Sync code uses a facade over the same core, run in a thread or
+  subinterpreter host ([surfaces](surfaces.md)).
 - **Cancellation loses nothing.** A cancelled receive leaves an item that
   already arrived for the next receive.
 - **Bounded memory.** Each channel has a receiver-granted window; a sender
@@ -252,7 +257,7 @@ plugins may also crash. The isolation is for state, not hostile code.
 - **Three kinds of error:** the other side failed (`RemoteError`, with the
   remote traceback); the connection is gone (`ChannelClosed`, `WorkerGone`,
   `HostNotFound`, all `OSError`); you used the API wrong (`StateError`).
-  Blocking timeouts raise the builtin `TimeoutError`.
+  Sync-facade timeouts raise the builtin `TimeoutError`.
 - **Skew fails first.** Mismatched runsomewhere versions refuse at handshake,
   before any service runs.
 - **Secrets stay out of `ps`.** Worker configuration, including environment
@@ -279,32 +284,30 @@ plugins may also crash. The isolation is for state, not hostile code.
 
 | Document | Covers |
 |---|---|
+| [API surfaces and engine hosts](surfaces.md) | the async core, thread and subinterpreter engine hosts, the sync and async facades |
 | [Gateways and channels](gateways-and-channels.md) | worker and gateway, the gateway's lifecycle and output, channels, flow control, the wire, errors |
 | [Services](services.md) | declaring services, channels and clients, built-in services, where handlers run, stopping |
 | [Remote exec](remote-exec.md) | running strings, modules and functions sent by the caller; off by default |
 | [Relaying](relaying.md) | `via`: workers spawned through workers; `proxy`: connections from a worker's vantage point |
 | [Places, interpreters and deployment](deployment.md) | referring to hosts, containers and interpreters; environments; deploying a project |
-| [Bootstrapping](bootstrap.md) | getting uv, Python and runsomewhere onto a target, by what it already has |
+| [Bootstrapping](bootstrap.md) | using an existing install; the ladder from stdin and sockets to importable wheels when there is none |
 
-All protocol IO in a process runs on one **engine thread**. Your code, async
-or blocking, hands work to it and waits, so a slow caller never stalls the
-protocol. Trio users who want the IO in their own nursery open a group with
-`inline=True`.
 
 ## Status and open decisions
 
 Build order, each step its own pull request: skeleton; core protocol with the
-`Process` place; services, clients and remote exec; the async, blocking and
-inline surfaces; `Thread` and `Subinterpreter`; uv provisioning, `Ssh` and
+`Process` place; services, clients and remote exec; the engine hosts and the
+sync facade; `Thread` and `Subinterpreter`; uv provisioning, `Ssh` and
 `Deployment`; podman then docker; later kubernetes and a gevent profile.
 
 Proposed, not yet settled:
 
-1. Clients written once, async; `gateway.open(Client)` on the blocking
-   surface yields a blocking wrapper ([services](services.md)).
+1. Clients written once, async; `gateway.open(Client)` on the sync facade
+   yields a sync wrapper ([services](services.md)).
 2. Copy semantics on threads too, with no `Thread(shared=True)`.
-3. The engine written on anyio, which is what lets `inline=True` also work
-   under asyncio.
+3. The core written on anyio, so it runs in trio and asyncio callers alike;
+   the thread engine host by default, the subinterpreter one opt-in until
+   measured ([surfaces](surfaces.md)).
 4. Kubernetes (`kubectl exec -i`) in-tree after ssh and podman, with no public
    transport extension point until an outside transport asks for one.
 5. No greenlet feature until someone asks; a gevent worker profile first if

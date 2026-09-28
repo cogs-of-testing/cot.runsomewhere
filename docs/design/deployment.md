@@ -52,8 +52,14 @@ caller's environment.
 
 ## Referring to installed code: environments
 
-What the worker's interpreter can import is its **environment**, one of three
-kinds:
+What the worker's interpreter can import is its **environment**, one of four
+kinds, in order of preference:
+
+**Installed.** An environment on the target that already has runsomewhere
+and the system's services, named by its interpreter
+(`python="/opt/app/.venv/bin/python"`) or built into a container image. This
+is the desired mode: it is used as it is, and nothing is bootstrapped
+([bootstrapping](bootstrap.md)).
 
 **Current.** The caller's own environment. Always the case for threads and
 subinterpreters; the default for a local `Process` without `python=`.
@@ -80,8 +86,10 @@ rsh.Deployment(".", roots=["testing", "conftest.py"], name="mypkg-ci")
 - extra **roots**: what a run needs that the wheel does not contain, such as
   tests, conftest files and fixture data, transferred diff-only.
 
-Every runsomewhere environment also contains runsomewhere itself, at the
-caller's exact version ([bootstrapping](bootstrap.md)).
+Provisioned environments and deployments are built by runsomewhere, and get
+runsomewhere itself at the caller's exact version
+([bootstrapping](bootstrap.md)). An installed one must already have a
+version the handshake accepts: the same major and minor.
 
 ## Deploying
 
