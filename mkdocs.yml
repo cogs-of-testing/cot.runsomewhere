@@ -47,7 +47,7 @@ nav:
     - Overview: design/index.md
     - Gateways and channels: design/gateways-and-channels.md
     - Services: design/services.md
-    - Running code: design/exec.md
+    - Remote exec: design/remote-exec.md
     - Relaying: design/relaying.md
     - Places, interpreters and deployment: design/deployment.md
     - Bootstrapping: design/bootstrap.md

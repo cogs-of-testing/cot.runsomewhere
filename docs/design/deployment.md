@@ -6,7 +6,7 @@ it.*
 
 Status: design. Decisions marked **proposed** are open for review.
 
-Three questions decide where a component runs: which *machine or container*,
+Three questions decide where a service runs: which *machine or container*,
 which *interpreter* there, and which *installed code* that interpreter sees.
 Each has its own value.
 
@@ -146,7 +146,7 @@ env.paths.translate("testing/test_x.py")   # "/home/ci/.local/share/.../testing/
 env.paths.root                             # the remote workspace
 ```
 
-A caller hands components remote paths, never local ones.
+A caller hands services remote paths, never local ones.
 
 ### A trap the deploy service handles
 

@@ -15,29 +15,35 @@ from cot import runsomewhere as rsh
 
 runsomewhere runs parts of a software system somewhere else and connects them
 to the rest. "Somewhere" is a thread, a subinterpreter, another process,
-another machine over ssh, or a container. A part, a **component**, is code
-your system already ships, with its own main loop; runsomewhere deploys the
-code the component needs to where it will run when it is not already there,
-starts it there, and gives both sides channels to talk over. Where a component
-runs is one typed value, so moving it from a local process to a build box or
-a container does not change the component or the code talking to it.
+another machine over ssh, or a container. A part is a **service**: code your
+system already ships, declared by its package, talked to over a channel.
+runsomewhere deploys the code a service needs to where it will run when it is
+not already there, starts a worker there, and connects the caller to the
+service. Where a service runs is one typed value, so moving it from a local
+process to a build box or a container changes neither the service nor the
+code using it.
 
-## The unit is a component
+## The unit is a service
 
-What runs elsewhere is a component: a part of the system designed to run on
-its own, such as a test runner, a build agent, a plugin host or a host agent.
-It has a main, an interface (the messages on its channels), and a lifetime,
-failure and resources of its own.
+What runs elsewhere is a service: a part of the system designed to run on its
+own, such as a test runner, a build agent, a plugin host or a host agent. Its
+package declares it as a Python entry point, and ships a client that gives
+callers its API:
 
-A component's code arrives by deployment, as installed packages at a version
+```toml
+[project.entry-points."cot.runsomewhere.services"]
+"mypkg.testing.runner" = "mypkg.testing.runner:serve"
+```
+
+A service's code arrives by deployment, as installed packages at a version
 you chose, so both sides are checked, tested and versioned like the rest of
-the system. The wire carries data: plain builtin values and channels. Source
-text can be sent only where a caller explicitly enables it for one worker,
-for ad-hoc work and debugging ([exec](exec.md)).
+the system. The wire carries data: plain builtin values and channels. Code
+sent by the caller runs only on a worker where the caller enabled
+[remote exec](remote-exec.md), for ad-hoc work and debugging.
 
 ## The model
 
-**Place**: where a component runs. A typed value.
+**Place**: where a worker runs. A typed value.
 
 ```python
 rsh.Thread()
@@ -48,85 +54,90 @@ rsh.Container("fedora:44", runtime="podman")     # fresh container
 rsh.Container(name="db-1", runtime="podman")     # exec into a running one
 ```
 
-**Environment**: what is installed where the component runs. Threads and
+**Environment**: what is installed where the worker runs. Threads and
 subinterpreters share the caller's. Everywhere else it is the caller's own
 environment, one provisioned by uv from requirements, or a **Deployment**: your
 project's lockfile, its wheel and extra file trees, sent diff-only on repeat.
 
 **Worker**: a runsomewhere interpreter running in a place and environment. It
-hosts components and services.
+offers the services declared in its environment.
 
 **Gateway**: the link to one worker, over one byte stream. You spawn a worker
 and get its gateway; everything else goes through it
 ([gateways and channels](gateways-and-channels.md)).
 
-**Service**: a named capability a worker offers, opened as a channel. Running
-components, relaying, deploying and transferring files are built-in services;
-packages declare their own ([services](services.md)).
-
-**Component**: a part of your system, started on a gateway by its main's
-import path. It receives a channel and its configuration, runs as long as it needs,
-and may end with a result.
-
-```python
-async def main(channel, *, root):
-    async for job in channel:
-        await channel.send(run(job, root))
-    return {"ran": count}
-```
+**Service**: a declared part of the system. Opening it on a gateway calls its
+handler with a fresh channel. Deploying, relaying and file transfer are
+built-in services ([services](services.md)).
 
 **Channel**: an ordered, two-way stream of values. Channels can be sent over
-channels, so a component can hand out further conversations, one per
-subsystem or per client.
+channels, so a service can hand out further conversations.
 
-**Group**: the scope that owns workers and their components. Closing it stops
-them in reverse order of creation, on success, error or cancellation alike.
+**Client**: the object a service's package provides, which owns the channel
+and offers the service's API. Callers use clients; channels are the level
+below.
+
+**Group**: the scope that owns gateways. Closing it closes them in reverse
+order of creation, on success, error or cancellation alike.
 
 ```python
 async with rsh.open_group() as group:
     gateway = await group.spawn(rsh.Process())
-    runner = await gateway.start("mypkg.runner:main", root="/srv")
-    await runner.channel.send({"job": 1})
-    reply = await runner.channel.receive()
-    ...
-    await runner.channel.aclose()
-    summary = await runner.wait()
+    async with gateway.open(Runner, root="/srv") as runner:
+        report = await runner.run("testing/test_x.py::test_one")
+```
+
+with the service and its client in the same package:
+
+```python
+async def serve(channel, *, root):
+    async for item in channel:
+        await channel.send(run_test(item, root))
+
+
+class Runner(rsh.Client, service="mypkg.testing.runner"):
+    async def run(self, test_id: str) -> dict:
+        await self.channel.send(test_id)
+        return await self.channel.receive()
 ```
 
 ## Use cases
 
-### Test runner workers
+### Test runners
 
-The distributed-test shape: N runner components, each taking tests and
-streaming reports back, with the controller feeding work as runners free up.
+The distributed-test shape: N runners, each taking tests and reporting back,
+with the controller feeding work as runners free up.
 
 ```python
-async with rsh.open_group() as group:
+async with rsh.open_group() as group, AsyncExitStack() as stack:
     runners = [
-        await (await group.spawn(rsh.Process())).start("mypkg.testing.runner:main")
+        await stack.enter_async_context(
+            (await group.spawn(rsh.Process())).open(Runner, root=".")
+        )
         for _ in range(8)
     ]
     async with anyio.create_task_group() as tg:
         for runner in runners:
-            tg.start_soon(drive, runner.channel, schedule)
+            tg.start_soon(drive, runner, schedule)
 ```
 
 A runner that crashes, leaks or segfaults takes its own worker with it. The
-controller sees `WorkerGone` on that runner's channel and reschedules its
-tests. The channel window stops a fast runner from filling the controller's
-memory with reports.
+controller sees `WorkerGone` from that runner and reschedules its tests. The
+channel window stops a fast runner from filling the controller's memory with
+reports.
 
 ### The same suite on a remote box, deployed
 
 ```python
-async with rsh.open_group() as group:
+async with rsh.open_group() as group, AsyncExitStack() as stack:
     host = await group.spawn(rsh.Ssh("buildbox"))
     env = await host.deploy(rsh.Deployment(".", roots=["testing"]))
     runners = [
-        await (await env.spawn(rsh.Process())).start("mypkg.testing.runner:main")
+        await stack.enter_async_context(
+            (await env.spawn(rsh.Process())).open(Runner, root=env.paths.root)
+        )
         for _ in range(16)
     ]
-    remote_path = env.paths.translate("testing/test_x.py")
 ```
 
 The box needs a POSIX shell and a platform uv builds for; uv, Python and
@@ -134,9 +145,8 @@ runsomewhere are brought along when missing ([bootstrapping](bootstrap.md)).
 The deployment carries the lockfile, the project's wheel and the test tree,
 and a second deploy sends only what changed ([deployment](deployment.md)). All
 sixteen workers are spawned through the build box's worker, over one ssh
-connection ([relaying](relaying.md)).
-The runner component and the controller code are the same as in the local
-case.
+connection ([relaying](relaying.md)). The runner and the controller code are
+the same as in the local case.
 
 ### Across Pythons and distros
 
@@ -147,52 +157,69 @@ places = [rsh.Process(python=v) for v in ["3.10", "3.12", "3.14"]] + [
 async with rsh.open_group() as group:
     for place in places:
         gateway = await group.spawn(place, deploy=rsh.Deployment("."))
-        session = await gateway.start("mypkg.testing.session:main")
-        async for report in session.channel:
-            show(place, report)
+        async with gateway.open(Session) as session:
+            async for report in session.reports():
+                show(place, report)
 ```
 
-One component, one deployment, six places. uv provisions and caches the
+One service, one deployment, six places. uv provisions and caches the
 interpreters. A container image with runsomewhere installed is used as is;
 otherwise the cached wheel is mounted and run under uv inside the container.
 
 ### An agent on every host
 
-A small, long-lived component on each machine of a fleet, answering queries and
+A long-lived service on each machine of a fleet, answering queries and
 applying changes. A script drives it, with no event loop in sight:
 
 ```python
 with rsh.blocking.open_group() as group:
-    agents = {
-        name: group.spawn(rsh.Ssh(name)).start("fleet.agent:main")
-        for name in ["nas", "router", "pi"]
-    }
-    for name, agent in agents.items():
-        agent.channel.send({"op": "status"})
-        print(name, agent.channel.receive(timeout=10))
+    for name in ["nas", "router", "pi"]:
+        with group.spawn(rsh.Ssh(name)).open(Agent) as agent:
+            print(name, agent.status())
 ```
 
-The agent's messages are its interface; the controller parses dicts, not shell
-output. The blocking surface is the async API without `await`, plus `timeout=`.
+The agent's client is its interface; the script calls methods, it does not
+parse shell output. The blocking surface is the async API without `await`,
+plus `timeout=`.
 
-### A diagnostics component inside a running container
+### Poking at a host
+
+Not everything is worth a package. For a one-off question, remote exec sends
+a function, as text, to a worker that has it enabled:
+
+```python
+def listing(channel, path):
+    import os
+
+    return sorted(os.listdir(path))
+
+
+gateway = await group.spawn(rsh.Ssh("nas"), services={"rsh.remote_exec": True})
+channel = await gateway.remote_exec(listing, path="/var/lib/app")
+print(await channel.wait_closed())
+```
+
+### Diagnostics inside a running container
 
 ```python
 async with rsh.open_group() as group:
     gateway = await group.spawn(rsh.Container(name="app-1"))
-    probe = await gateway.start("app.diagnostics:main")
-    await probe.channel.send({"dump": "connections"})
+    async with gateway.open(Diagnostics) as diag:
+        print(await diag.connections())
 ```
 
 `Container(name=...)` execs into a container that is already running, without
-restarting it or baking a debug port into the image.
+restarting it or baking a debug port into the image. The image needs the
+package declaring the diagnostics service; runsomewhere itself is brought
+along if missing.
 
 ### A plugin host, isolated
 
 ```python
 async with rsh.open_group() as group:
     gateway = await group.spawn(rsh.Subinterpreter())
-    plugins = await gateway.start("app.plugins.host:main", paths=plugin_paths)
+    async with gateway.open(PluginHost, paths=plugin_paths) as plugins:
+        await plugins.load_all()
 ```
 
 The plugin subsystem gets its own modules and globals, and plugins that mutate
@@ -204,12 +231,12 @@ plugins may also crash. The isolation is for state, not hostile code.
 
 ## What you can rely on
 
-- **Installed code, not shipped code.** Every component runs code installed in
-  its own environment, at a version you deployed. Source text crosses only to
-  a worker the caller explicitly enabled it for.
-- **Same semantics in every place.** Threads get copies too, and a
-  component's failure is `RemoteError` everywhere. A component that works in a
-  thread behaves the same in a container.
+- **Installed code, not shipped code.** Services run code installed in their
+  worker's environment, at a version you deployed. Code sent by the caller
+  runs only where remote exec was explicitly enabled.
+- **Same semantics in every place.** Threads get copies too, and a service's
+  failure is `RemoteError` everywhere. A service that works in a thread
+  behaves the same in a container.
 - **Values:** `None`, `bool`, `int`, `float`, `complex`, `str`, `bytes`,
   `tuple`, `list`, `dict`, `set`, `frozenset`, and channels.
   `rsh.can_send(x)` checks without sending.
@@ -227,7 +254,7 @@ plugins may also crash. The isolation is for state, not hostile code.
   `HostNotFound`, all `OSError`); you used the API wrong (`StateError`).
   Blocking timeouts raise the builtin `TimeoutError`.
 - **Skew fails first.** Mismatched runsomewhere versions refuse at handshake,
-  before any component starts.
+  before any service runs.
 - **Secrets stay out of `ps`.** Worker configuration, including environment
   values, travels over the protocol, never in argv.
 
@@ -237,11 +264,11 @@ plugins may also crash. The isolation is for state, not hostile code.
   semantics. A thread fast path may later skip the encoding, still handing
   over copies.
 - **Start cost follows isolation:** thread, subinterpreter, process, container,
-  remote host, roughly in that order. Components are meant to be long-lived;
-  if you would start one per request, you want a function call instead.
-- **Not remote procedure calls.** There is no "run this function over there
-  and return". If the far side is worth running elsewhere, it is worth being a
-  component with an interface.
+  remote host, roughly in that order. Workers are meant to be long-lived;
+  reuse them rather than spawning one per request.
+- **Not remote procedure calls.** Parts of a system that run elsewhere are
+  services with an interface. Remote exec runs sent code for ad-hoc work; it
+  is off by default and not how a system is built.
 - **Not a security boundary.** Both sides are trusted.
 - **Not an object proxy.** You cannot hold a reference to a remote object.
 - **Not a scheduler or orchestrator.** You pick the place. There is no
@@ -252,9 +279,9 @@ plugins may also crash. The isolation is for state, not hostile code.
 
 | Document | Covers |
 |---|---|
-| [Gateways and channels](gateways-and-channels.md) | worker and gateway, the gateway's lifecycle, channels, flow control, the wire, errors |
-| [Services](services.md) | the service model, built-in services, declaring your own |
-| [Running code](exec.md) | the exec service: components, profiles, stopping, output, opt-in source |
+| [Gateways and channels](gateways-and-channels.md) | worker and gateway, the gateway's lifecycle and output, channels, flow control, the wire, errors |
+| [Services](services.md) | declaring services, channels and clients, built-in services, where handlers run, stopping |
+| [Remote exec](remote-exec.md) | running strings, modules and functions sent by the caller; off by default |
 | [Relaying](relaying.md) | `via`: workers spawned through workers; `proxy`: connections from a worker's vantage point |
 | [Places, interpreters and deployment](deployment.md) | referring to hosts, containers and interpreters; environments; deploying a project |
 | [Bootstrapping](bootstrap.md) | getting uv, Python and runsomewhere onto a target, by what it already has |
@@ -267,23 +294,20 @@ protocol. Trio users who want the IO in their own nursery open a group with
 ## Status and open decisions
 
 Build order, each step its own pull request: skeleton; core protocol with the
-`Process` place; components and channels; the async, blocking and inline
-surfaces; `Thread` and `Subinterpreter`; uv provisioning, `Ssh` and
+`Process` place; services, clients and remote exec; the async, blocking and
+inline surfaces; `Thread` and `Subinterpreter`; uv provisioning, `Ssh` and
 `Deployment`; podman then docker; later kubernetes and a gevent profile.
 
 Proposed, not yet settled:
 
-1. Components started by the import path of their main, not declared by name
-   ([exec](exec.md)).
-2. Three profiles for where a component runs in its worker, `thread`, `main`
-   and `loop`, with the worker's loop (trio or asyncio) chosen at spawn
-   ([exec](exec.md)).
-3. Copy semantics on threads too, with no `Thread(shared=True)`.
-4. The engine written on anyio, which is what lets `inline=True` also work
+1. Clients written once, async; `gateway.open(Client)` on the blocking
+   surface yields a blocking wrapper ([services](services.md)).
+2. Copy semantics on threads too, with no `Thread(shared=True)`.
+3. The engine written on anyio, which is what lets `inline=True` also work
    under asyncio.
-5. Kubernetes (`kubectl exec -i`) in-tree after ssh and podman, with no public
+4. Kubernetes (`kubectl exec -i`) in-tree after ssh and podman, with no public
    transport extension point until an outside transport asks for one.
-6. No greenlet feature until someone asks; a gevent worker profile first if
+5. No greenlet feature until someone asks; a gevent worker profile first if
    they do.
 
 Each part document marks its own proposals.

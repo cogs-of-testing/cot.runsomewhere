@@ -125,8 +125,8 @@ stdio, it is:
 | ssh to Windows | stdio |
 | container | stdio |
 
-A worker on stdio moves the protocol off fd 0 and 1 before it runs any
-component.
+A worker on stdio moves the protocol off fd 0 and 1 before it runs anything
+else.
 
 ## Tier 4: no uv at all
 

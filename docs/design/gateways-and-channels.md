@@ -14,8 +14,8 @@ the thing that has a pid, a Python version and an environment.
 
 A **gateway** is the link to one worker: the protocol spoken over one byte
 stream, with an endpoint on each side. Everything you do with a worker, you
-do through its gateway: open channels, use its services, start components on
-it, spawn further workers through it, close it.
+do through its gateway: open its services, spawn further workers through
+it, close it.
 
 ```python
 async with rsh.open_group() as group:
@@ -23,7 +23,7 @@ async with rsh.open_group() as group:
     gateway.worker.python      # "3.12.9"
     gateway.worker.pid         # 41327
     gateway.worker.platform    # "linux-x86_64"
-    gateway.services           # frozenset({"rsh.exec", "rsh.via", ...})
+    gateway.services           # frozenset({"rsh.info", "rsh.via", ...})
 ```
 
 `group.spawn` returns the gateway. `gateway.worker` describes what is on the
@@ -51,12 +51,12 @@ launch ─► handshake ─► configure ─► serve ─► close ─► closed
    caller can only learn EOF.
 3. **Configure.** The caller sends the worker's configuration as the first
    frame after the handshake: working directory, environment values, stdio
-   disposition, enabled services, profile defaults. Configuration never
-   travels in argv, where `ps` and `/proc` would show it.
-4. **Serve.** Channels open and close; services and components run.
+   disposition, enabled services, event loop. Configuration never travels
+   in argv, where `ps` and `/proc` would show it.
+4. **Serve.** Channels open and close; services run.
 5. **Close.** The group, or `await gateway.aclose()`, asks the worker to shut
-   down. The worker cancels its components and services, closes their
-   channels, and exits. The caller waits for EOF, then terminates the worker
+   down. The worker stops its running services, closes their channels, and
+   exits. The caller waits for EOF, then terminates the worker
    and, after a grace period, kills it.
 6. **Gone.** On EOF or a transport error at any point, every open channel
    fails with `WorkerGone`, and the gateway is closed. Nothing reconnects;
@@ -66,6 +66,23 @@ A gateway belongs to exactly one group. Closing the group closes its
 gateways in reverse order of creation, so a worker spawned through another is
 closed before the one it runs through.
 
+### Output
+
+A worker whose protocol runs on its own stream leaves stdio to the code it
+runs. Where that output goes is part of the configuration:
+
+- `inherit`: whatever the place gives the worker (the caller's terminal for a
+  local process, ssh's streams for a remote one);
+- `forward`: captured and delivered to the caller on a channel,
+  `gateway.output`, as lines;
+- `discard`.
+
+**Proposed:** `inherit` by default for local processes, `forward` for remote
+hosts and containers, where "inherit" would put output somewhere the caller
+cannot see. When the protocol itself has to run on stdio
+([bootstrapping](bootstrap.md)), the worker moves it off fd 0 and 1 first, so
+a stray `print` cannot corrupt the stream.
+
 ## Channels
 
 A channel is an ordered, two-way stream of values between two endpoints on
@@ -73,27 +90,25 @@ one gateway. Values are `None`, `bool`, `int`, `float`, `complex`, `str`,
 `bytes`, `tuple`, `list`, `dict`, `set`, `frozenset`, and channels.
 
 ```python
-ch = await gateway.open("fleet.status", verbose=True)   # a service, see services
-await ch.send({"op": "status"})
-reply = await ch.receive()
-async for item in ch:                                    # until the other side closes
-    ...
-await ch.aclose()
+async with gateway.open("fleet.agent", verbose=True) as ch:   # a service, see services
+    await ch.send({"op": "status"})
+    reply = await ch.receive()
+    async for item in ch:                                      # until the other side closes
+        ...
 ```
 
 ### Opening
 
 A channel is always opened *to* something on the far side: a service by
-name, with parameters ([services](services.md)). Starting a component is
-opening a channel to the exec service ([exec](exec.md)). There are no
-anonymous channels at gateway level; a channel with no service would have
-nobody to talk to.
+name, with parameters ([services](services.md)), or code sent with
+[remote exec](remote-exec.md). There are no anonymous channels at gateway
+level; a channel with no service would have nobody to talk to.
 
 Further channels are created by the endpoints themselves and sent over an
 existing channel:
 
 ```python
-async def main(channel):
+async def serve(channel):
     logs = channel.new()          # created here, usable once the peer receives it
     await channel.send({"logs": logs})
 ```
@@ -115,8 +130,8 @@ final for both directions: a channel is a conversation, and a half-open one
 is a bug waiting to happen. Two directions that end independently are two
 channels.
 
-When a component's main returns, its channel closes with the return value as
-the result, which the caller reads with `await handle.wait()`.
+When a service's handler returns, its channel closes with the return value
+as the result, which the caller reads with `await channel.wait_closed()`.
 
 ### Flow control
 
