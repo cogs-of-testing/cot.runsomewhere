@@ -29,10 +29,11 @@ its own, such as a test runner, a build agent, a plugin host or a host agent.
 It has a main, an interface (the messages on its channels), and a lifetime,
 failure and resources of its own.
 
-Code never travels over the wire. A component's code arrives by deployment, as
-installed packages at a version you chose, so both sides are checked, tested
-and versioned like the rest of the system. The wire carries only data: plain
-builtin values and channels.
+A component's code arrives by deployment, as installed packages at a version
+you chose, so both sides are checked, tested and versioned like the rest of
+the system. The wire carries data: plain builtin values and channels. Source
+text can be sent only where a caller explicitly enables it for one worker,
+for ad-hoc work and debugging ([exec](exec.md)).
 
 ## The model
 
@@ -53,10 +54,18 @@ environment, one provisioned by uv from requirements, or a **Deployment**: your
 project's lockfile, its wheel and extra file trees, sent diff-only on repeat.
 
 **Worker**: a runsomewhere interpreter running in a place and environment. It
-hosts one or more components.
+hosts components and services.
 
-**Component**: a part of your system, started in a worker by its main's import
-path. It receives a channel and its configuration, runs as long as it needs,
+**Gateway**: the link to one worker, over one byte stream. You spawn a worker
+and get its gateway; everything else goes through it
+([gateways and channels](gateways-and-channels.md)).
+
+**Service**: a named capability a worker offers, opened as a channel. Running
+components, relaying, deploying and transferring files are built-in services;
+packages declare their own ([services](services.md)).
+
+**Component**: a part of your system, started on a gateway by its main's
+import path. It receives a channel and its configuration, runs as long as it needs,
 and may end with a result.
 
 ```python
@@ -75,8 +84,8 @@ them in reverse order of creation, on success, error or cancellation alike.
 
 ```python
 async with rsh.open_group() as group:
-    worker = await group.spawn(rsh.Process())
-    runner = await worker.start("mypkg.runner:main", root="/srv")
+    gateway = await group.spawn(rsh.Process())
+    runner = await gateway.start("mypkg.runner:main", root="/srv")
     await runner.channel.send({"job": 1})
     reply = await runner.channel.receive()
     ...
@@ -120,9 +129,12 @@ async with rsh.open_group() as group:
     remote_path = env.paths.translate("testing/test_x.py")
 ```
 
-The box needs Python reachable by uv and nothing else. The deployment carries
-the lockfile, the project's wheel and the test tree, and a second deploy sends
-only what changed. All sixteen workers are relayed through one ssh connection.
+The box needs a POSIX shell and a platform uv builds for; uv, Python and
+runsomewhere are brought along when missing ([bootstrapping](bootstrap.md)).
+The deployment carries the lockfile, the project's wheel and the test tree,
+and a second deploy sends only what changed ([deployment](deployment.md)). All
+sixteen workers are spawned through the build box's worker, over one ssh
+connection ([relaying](relaying.md)).
 The runner component and the controller code are the same as in the local
 case.
 
@@ -134,8 +146,8 @@ places = [rsh.Process(python=v) for v in ["3.10", "3.12", "3.14"]] + [
 ]
 async with rsh.open_group() as group:
     for place in places:
-        worker = await group.spawn(place, deploy=rsh.Deployment("."))
-        session = await worker.start("mypkg.testing.session:main")
+        gateway = await group.spawn(place, deploy=rsh.Deployment("."))
+        session = await gateway.start("mypkg.testing.session:main")
         async for report in session.channel:
             show(place, report)
 ```
@@ -167,8 +179,8 @@ output. The blocking surface is the async API without `await`, plus `timeout=`.
 
 ```python
 async with rsh.open_group() as group:
-    worker = await group.spawn(rsh.Container(name="app-1"))
-    probe = await worker.start("app.diagnostics:main")
+    gateway = await group.spawn(rsh.Container(name="app-1"))
+    probe = await gateway.start("app.diagnostics:main")
     await probe.channel.send({"dump": "connections"})
 ```
 
@@ -179,8 +191,8 @@ restarting it or baking a debug port into the image.
 
 ```python
 async with rsh.open_group() as group:
-    worker = await group.spawn(rsh.Subinterpreter())
-    plugins = await worker.start("app.plugins.host:main", paths=plugin_paths)
+    gateway = await group.spawn(rsh.Subinterpreter())
+    plugins = await gateway.start("app.plugins.host:main", paths=plugin_paths)
 ```
 
 The plugin subsystem gets its own modules and globals, and plugins that mutate
@@ -192,8 +204,9 @@ plugins may also crash. The isolation is for state, not hostile code.
 
 ## What you can rely on
 
-- **Code never crosses the wire.** Only data does. Every component runs code
-  installed in its own environment, at a version you deployed.
+- **Installed code, not shipped code.** Every component runs code installed in
+  its own environment, at a version you deployed. Source text crosses only to
+  a worker the caller explicitly enabled it for.
 - **Same semantics in every place.** Threads get copies too, and a
   component's failure is `RemoteError` everywhere. A component that works in a
   thread behaves the same in a container.
@@ -235,29 +248,21 @@ plugins may also crash. The isolation is for state, not hostile code.
   cluster, no placement, no restart policy.
 - **Python 3.10 and newer,** on Linux, macOS and Windows.
 
-## How it works
+## The parts
 
-One **engine thread** per process runs all protocol IO. Your code, async or
-blocking, hands work to it and waits; a slow caller never stalls the protocol.
-Trio users who want the IO in their own nursery can open a group with
-`inline=True`.
-
-A **worker** is runsomewhere itself, installed in the target environment and
-started as `python -m cot.runsomewhere worker`. Both sides speak one protocol
-over a byte stream, whatever the place:
-
-| Place | Stream |
+| Document | Covers |
 |---|---|
-| thread, subinterpreter | in-memory pair |
-| process | socketpair (`socket.share()` on Windows) |
-| ssh | dial-back socket where possible, else stdio |
-| container | stdio via `podman run -i` / `podman exec -i` |
+| [Gateways and channels](gateways-and-channels.md) | worker and gateway, the gateway's lifecycle, channels, flow control, the wire, errors |
+| [Services](services.md) | the service model, built-in services, declaring your own |
+| [Running code](exec.md) | the exec service: components, profiles, stopping, output, opt-in source |
+| [Relaying](relaying.md) | `via`: workers spawned through workers; `proxy`: connections from a worker's vantage point |
+| [Places, interpreters and deployment](deployment.md) | referring to hosts, containers and interpreters; environments; deploying a project |
+| [Bootstrapping](bootstrap.md) | getting uv, Python and runsomewhere onto a target, by what it already has |
 
-The stream is kept off stdio where the place allows, so stray prints in a
-component cannot corrupt it. Frames are length-prefixed; the first exchange is
-a versioned handshake, then the configuration frame. Deploying, spawning
-through a worker and socket handoff are protocol operations, not code sent to
-run.
+All protocol IO in a process runs on one **engine thread**. Your code, async
+or blocking, hands work to it and waits, so a slow caller never stalls the
+protocol. Trio users who want the IO in their own nursery open a group with
+`inline=True`.
 
 ## Status and open decisions
 
@@ -268,14 +273,11 @@ surfaces; `Thread` and `Subinterpreter`; uv provisioning, `Ssh` and
 
 Proposed, not yet settled:
 
-1. **Component naming.** Started by the import path of its main, as above, or
-   declared by the package under an entry-point group
-   (`[project.entry-points."cot.runsomewhere"] runner = "mypkg.testing.runner:main"`)
-   and started by name, so that only parts the system declares can be run
-   elsewhere.
-2. **Where a component's code runs inside its worker:** its own thread, the
-   worker's main thread, or a task on the worker's trio or asyncio loop,
-   chosen per component at start.
+1. Components started by the import path of their main, not declared by name
+   ([exec](exec.md)).
+2. Three profiles for where a component runs in its worker, `thread`, `main`
+   and `loop`, with the worker's loop (trio or asyncio) chosen at spawn
+   ([exec](exec.md)).
 3. Copy semantics on threads too, with no `Thread(shared=True)`.
 4. The engine written on anyio, which is what lets `inline=True` also work
    under asyncio.
@@ -283,3 +285,5 @@ Proposed, not yet settled:
    transport extension point until an outside transport asks for one.
 6. No greenlet feature until someone asks; a gevent worker profile first if
    they do.
+
+Each part document marks its own proposals.
