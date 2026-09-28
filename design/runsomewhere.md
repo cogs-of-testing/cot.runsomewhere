@@ -1,297 +1,285 @@
-# runsomewhere: design
+# cot.runsomewhere: design
 
-*Written by Claude Opus 5.5 via Claude Code for Ronny and future runsomewhere
-contributors; Ronny prompted it, it did the work, Ronny read it.*
+*Written by Claude Opus 5.5 via Claude Code for senior engineers deciding
+whether runsomewhere fits their system; Ronny prompted it, it did the work,
+Ronny read it.*
 
-Status: proposal. Nothing here is implemented yet.
-
-## What it is
-
-runsomewhere runs Python code somewhere other than the current interpreter, and
-talks to it while it runs. "Somewhere" means any of these, from least to most
-isolated:
-
-| Place | Isolation | Code arrives by |
-|---|---|---|
-| thread | none: shared modules and objects | already imported |
-| subinterpreter | its own modules, same process | same environment |
-| process | its own interpreter, same machine | same environment, or provisioned |
-| remote host | another machine (ssh) | provisioned with uv |
-| container | another root filesystem (podman, docker; later kubernetes pods) | image, or provisioned with uv |
-
-Every place has one programming model: start a *worker* in a place, then call
-*entrypoints* on it and exchange data with them over *channels*. Code can move
-from a thread to a container by changing only the place.
-
-## Where it comes from
-
-runsomewhere is a new package, started from an empty repository. Its prior art
-is the async-core rework of execnet,
-[pytest-dev/execnet#422](https://github.com/pytest-dev/execnet/pull/422), and
-that PR is where the history lives: the design decisions, the ones that were made
-and then unmade, and the failure modes the tests pin down. Code comes over from
-there piece by piece, when a step below needs it, rewritten against this design.
-It is not imported wholesale.
-
-execnet itself stays where it is, for pytest-xdist. runsomewhere owes it **no
-backward compatibility**: no shims, no forwarding modules, and no interoperation
-with execnet on the wire.
-
-Ideas worth porting from the PR:
-
-- the single async protocol engine, running on trio or asyncio, with one engine
-  thread per process;
-- no source shipping: a worker runs an installed runsomewhere and is launched
-  through the `worker` CLI, which is the launch contract;
-- uv provisioning of foreign interpreters and remote hosts;
-- `Deployment` and `transfer`: a locked environment plus the project, and trees
-  sent diff-only;
-- the protocol off stdio, with a socketpair, `socket.share()` or ssh dial-back;
-- the error taxonomy (below);
-- the typed wire format, and `can_send`.
-
-## Concepts
-
-**Place**: where a worker runs. It is a typed value, not a string:
+Status: design. Nothing is implemented yet. The API below is a sketch; names
+may still move, the model will not.
 
 ```python
-rs.Thread()
-rs.Subinterpreter()
-rs.Process(python="3.13")
-rs.Ssh("box", python="3.13", config="~/.ssh/config")
-rs.Container("quay.io/org/image:tag", runtime="podman")  # new container
-rs.Container(name="running-one", runtime="podman")  # exec into one
+from cot import runsomewhere as rsh
 ```
 
-A string form, such as `ssh=box//python=3.13`, remains only as a parser,
-`rs.parse_place()`, for command lines and config files.
+## In one paragraph
 
-**Worker**: a running peer in a place. It is an async context manager, and it is
-the identity: there is no `id=`.
+runsomewhere runs parts of a software system somewhere else and connects them
+to the rest. "Somewhere" is a thread, a subinterpreter, another process,
+another machine over ssh, or a container. A part, a **component**, is code
+your system already ships, with its own main loop; runsomewhere deploys the
+code the component needs to where it will run when it is not already there,
+starts it there, and gives both sides channels to talk over. Where a component
+runs is one typed value, so moving it from a local process to a build box or
+a container does not change the component or the code talking to it.
 
-**Environment**: what is installed where the worker runs. For threads and
-subinterpreters this is always the coordinator's own. For processes, hosts and
-containers it is one of:
+## The unit is a component
 
-- the current environment;
-- provisioned by uv from a requirement;
-- a `Deployment`: the project's lockfile, the project's wheel, and extra roots.
+What runs elsewhere is a component: a part of the system designed to run on
+its own, such as a test runner, a build agent, a plugin host or a host agent.
+It has a main, an interface (the messages on its channels), and a lifetime,
+failure and resources of its own.
 
-**Entrypoint**: code named by import path, `"pkg.module:function"`. The worker
-imports it from its own environment. Nothing is sent as source unless you ask
-for `exec_source`.
+Code never travels over the wire. A component's code arrives by deployment, as
+installed packages at a version you chose, so both sides are checked, tested
+and versioned like the rest of the system. The wire carries only data: plain
+builtin values and channels.
 
-**Channel**: an ordered, bidirectional stream of simple builtin values, plus
-channels. This is the same object model as execnet.
+## The model
 
-**Profile**: where an entrypoint runs *inside* the worker:
-
-- `thread`: a worker thread per call;
-- `main`: the worker's main thread, one call at a time;
-- `trio` or `asyncio`: a task on the worker's own loop, for async entrypoints.
-
-## API sketch
-
-The async surface is the primary one, and works under both trio and asyncio.
-It detects the running loop.
+**Place**: where a component runs. A typed value.
 
 ```python
-import runsomewhere as rs
-
-async with rs.open_group() as group:
-    worker = await group.spawn(rs.Process())
-
-    # one-shot: the return value comes back
-    total = await worker.call("mypkg.tasks:add", a=1, b=2)
-
-    # long-running: the entrypoint receives a channel as its first argument
-    async with await worker.open_channel("mypkg.worker:serve", root="/srv") as ch:
-        await ch.send({"job": 1})
-        async for item in ch:
-            ...
+rsh.Thread()
+rsh.Subinterpreter()                             # Python 3.14+
+rsh.Process(python="3.10")
+rsh.Ssh("box", python="3.13")
+rsh.Container("fedora:44", runtime="podman")     # fresh container
+rsh.Container(name="db-1", runtime="podman")     # exec into a running one
 ```
 
-Entrypoints are ordinary functions:
+**Environment**: what is installed where the component runs. Threads and
+subinterpreters share the caller's. Everywhere else it is the caller's own
+environment, one provisioned by uv from requirements, or a **Deployment**: your
+project's lockfile, its wheel and extra file trees, sent diff-only on repeat.
+
+**Worker**: a runsomewhere interpreter running in a place and environment. It
+hosts one or more components.
+
+**Component**: a part of your system, started in a worker by its main's import
+path. It receives a channel and its configuration, runs as long as it needs,
+and may end with a result.
 
 ```python
-def add(a, b):
-    return a + b
-
-
-async def serve(channel, root):
+async def main(channel, *, root):
     async for job in channel:
         await channel.send(run(job, root))
+    return {"ran": count}
 ```
 
-Hosts, environments and nested workers form a chain of objects. This replaces
-execnet's `via=` spec key and the `Deployed.spec` string splicing:
+**Channel**: an ordered, two-way stream of values. Channels can be sent over
+channels, so a component can hand out further conversations, one per
+subsystem or per client.
+
+**Group**: the scope that owns workers and their components. Closing it stops
+them in reverse order of creation, on success, error or cancellation alike.
 
 ```python
-host = await group.spawn(rs.Ssh("box"))
-env = await host.deploy(rs.Deployment(".", roots=["testing"]))
-workers = [await env.spawn(rs.Process(), profile="thread") for _ in range(4)]
-env.paths.translate("testing/test_x.py")  # local path -> remote path
+async with rsh.open_group() as group:
+    worker = await group.spawn(rsh.Process())
+    runner = await worker.start("mypkg.runner:main", root="/srv")
+    await runner.channel.send({"job": 1})
+    reply = await runner.channel.receive()
+    ...
+    await runner.channel.aclose()
+    summary = await runner.wait()
 ```
 
-`worker.spawn(place)` starts a child worker relayed through that worker. It is
-the one place-independent spelling of "run it from over there".
+## Use cases
 
-The blocking surface has the same shape, without `await`:
+### Test runner workers
+
+The distributed-test shape: N runner components, each taking tests and
+streaming reports back, with the controller feeding work as runners free up.
 
 ```python
-with rs.blocking.open_group() as group:
-    worker = group.spawn(rs.Ssh("box"))
-    print(worker.call("platform:node"))
+async with rsh.open_group() as group:
+    runners = [
+        await (await group.spawn(rsh.Process())).start("mypkg.testing.runner:main")
+        for _ in range(8)
+    ]
+    async with anyio.create_task_group() as tg:
+        for runner in runners:
+            tg.start_soon(drive, runner.channel, schedule)
 ```
 
-### Surfaces
+A runner that crashes, leaks or segfaults takes its own worker with it. The
+controller sees `WorkerGone` on that runner's channel and reschedules its
+tests. The channel window stops a fast runner from filling the controller's
+memory with reports.
 
-| Surface | For | Protocol IO runs on |
-|---|---|---|
-| `runsomewhere` | trio or asyncio callers | the shared engine thread |
-| `runsomewhere.blocking` | threads, scripts | the shared engine thread |
-| `open_group(inline=True)` | trio only: the gateway as tasks in your nursery | your loop |
+### The same suite on a remote box, deployed
 
-Inline mode is the execnet PR's `raw_trio` namespace, turned into a flag. It raises
-under asyncio. On the async surfaces, cancellation comes from the caller's own
-scope, so there is no `timeout=`. The blocking surface keeps `timeout=`.
+```python
+async with rsh.open_group() as group:
+    host = await group.spawn(rsh.Ssh("buildbox"))
+    env = await host.deploy(rsh.Deployment(".", roots=["testing"]))
+    runners = [
+        await (await env.spawn(rsh.Process())).start("mypkg.testing.runner:main")
+        for _ in range(16)
+    ]
+    remote_path = env.paths.translate("testing/test_x.py")
+```
 
-### Lifecycle
+The box needs Python reachable by uv and nothing else. The deployment carries
+the lockfile, the project's wheel and the test tree, and a second deploy sends
+only what changed. All sixteen workers are relayed through one ssh connection.
+The runner component and the controller code are the same as in the local
+case.
 
-There is no default group, no module-level `spawn`, and no atexit cleanup.
-Everything is opened with `async with` or `with`. A group owns its workers, and
-closing it terminates them in reverse order of creation.
+### Across Pythons and distros
 
-## Threads and subinterpreters speak the protocol too
+```python
+places = [rsh.Process(python=v) for v in ["3.10", "3.12", "3.14"]] + [
+    rsh.Container(image) for image in ["fedora:44", "debian:13", "alpine:3.22"]
+]
+async with rsh.open_group() as group:
+    for place in places:
+        worker = await group.spawn(place, deploy=rsh.Deployment("."))
+        session = await worker.start("mypkg.testing.session:main")
+        async for report in session.channel:
+            show(place, report)
+```
 
-The obvious design would give threads a direct function call and reserve the
-protocol for processes. That would give each place different semantics: shared
-mutable objects in a thread, copies everywhere else; exceptions as objects in one
-place, `RemoteError` in the others. So every place speaks the same protocol over a
-byte stream. In-process places use an in-memory stream pair, not a socket.
+One component, one deployment, six places. uv provisions and caches the
+interpreters. A container image with runsomewhere installed is used as is;
+otherwise the cached wheel is mounted and run under uv inside the container.
 
-This costs a serialization round trip per item on a thread, which a thread does
-not strictly need. A zero-copy fast path for threads is possible later, as long as
-it keeps copy semantics. Measure first.
+### An agent on every host
 
-Subinterpreters use `concurrent.interpreters` (PEP 734, Python 3.14+). Each one
-runs the worker on its own loop, and the byte stream crosses through an
-interpreter queue. This place needs a newer Python than the rest, and extension
-modules that support subinterpreters. Where either is missing, spawning a
-`Subinterpreter` fails with a clear error. It does not fall back to a thread.
+A small, long-lived component on each machine of a fleet, answering queries and
+applying changes. A script drives it, with no event loop in sight:
 
-## Containers
+```python
+with rsh.blocking.open_group() as group:
+    agents = {
+        name: group.spawn(rsh.Ssh(name)).start("fleet.agent:main")
+        for name in ["nas", "router", "pi"]
+    }
+    for name, agent in agents.items():
+        agent.channel.send({"op": "status"})
+        print(name, agent.channel.receive(timeout=10))
+```
 
-A container is a command transport, the same shape as ssh: `podman run --rm -i
-IMAGE runsomewhere worker --protocol-stdio`, or `podman exec -i NAME ...`. stdio is
-the default protocol transport here, because a socketpair does not cross the
-container boundary. A mounted unix socket is the later upgrade.
+The agent's messages are its interface; the controller parses dicts, not shell
+output. The blocking surface is the async API without `await`, plus `timeout=`.
 
-The image either already has runsomewhere installed, or provisioning mounts the
-host's cached wheel and runs it under uv inside the container, the way the
-execnet PR ships a wheel over ssh.
+### A diagnostics component inside a running container
 
-Kubernetes pods (`kubectl exec -i`) are the same transport again. Whether pods
-belong in-tree or behind a documented transport extension point is still open;
-see question 5.
+```python
+async with rsh.open_group() as group:
+    worker = await group.spawn(rsh.Container(name="app-1"))
+    probe = await worker.start("app.diagnostics:main")
+    await probe.channel.send({"dump": "connections"})
+```
 
-## Greenlets: none at first, but a place for them
+`Container(name=...)` execs into a container that is already running, without
+restarting it or baking a debug port into the image.
 
-runsomewhere starts without gevent. The execnet PR retired a public wait-backend
-registry, `Wakener`, in commit
-[RonnyPfannschmidt/execnet@bdf980d](https://github.com/RonnyPfannschmidt/execnet/commit/bdf980d),
-because nothing ever plugged into it. So the place kept for greenlets is internal, not a plugin
-point. It sits in three spots:
+### A plugin host, isolated
 
-1. **How the blocking surface waits.** It parks the caller on `OneShot` or
-   `Mailbox`, through a single wait backend: OS threads. A greenlet backend
-   becomes a second backend, and nothing else changes.
-2. **The "no blocking call inside a running loop" guard** belongs to the wait
-   backend, not to global state. In the execnet PR, monkey-patched `threading` makes
-   that guard refuse every blocking call, and this layout avoids that failure by
-   construction.
-3. **The engine thread** is started through one function, which can later ask
-   gevent for the unpatched `threading`. The engine must be a real OS thread,
-   even in a monkey-patched process.
+```python
+async with rsh.open_group() as group:
+    worker = await group.spawn(rsh.Subinterpreter())
+    plugins = await worker.start("app.plugins.host:main", paths=plugin_paths)
+```
 
-Worker profiles stay a closed set, and `gevent` joins it later.
+The plugin subsystem gets its own modules and globals, and plugins that mutate
+module state cannot reach the application's. A subinterpreter starts far
+faster than a process, but needs Python 3.14 and extension modules that
+support subinterpreters; without them the spawn fails with a clear error rather
+than quietly using a thread. Switch the place to `rsh.Process()` when the
+plugins may also crash. The isolation is for state, not hostile code.
 
-A second, separate meaning of "greenlet support" is the greenback or SQLAlchemy
-pattern: blocking-style calls from inside a running asyncio loop, bridged with
-greenlets. That would lift the guard in point 2 rather than enforce it. It is out
-of scope until someone needs it; see question 3.
+## What you can rely on
 
-## Wire protocol
+- **Code never crosses the wire.** Only data does. Every component runs code
+  installed in its own environment, at a version you deployed.
+- **Same semantics in every place.** Threads get copies too, and a
+  component's failure is `RemoteError` everywhere. A component that works in a
+  thread behaves the same in a container.
+- **Values:** `None`, `bool`, `int`, `float`, `complex`, `str`, `bytes`,
+  `tuple`, `list`, `dict`, `set`, `frozenset`, and channels.
+  `rsh.can_send(x)` checks without sending.
+- **Nothing outlives its group.** No global state, no default group, no atexit
+  hooks.
+- **trio, asyncio or plain threads.** The async API detects the running loop.
+  On async surfaces cancellation comes from your own scope, so there is no
+  `timeout=`.
+- **Cancellation loses nothing.** A cancelled receive leaves an item that
+  already arrived for the next receive.
+- **Bounded memory.** Each channel has a receiver-granted window; a sender
+  waits when it is full.
+- **Three kinds of error:** the other side failed (`RemoteError`, with the
+  remote traceback); the connection is gone (`ChannelClosed`, `WorkerGone`,
+  `HostNotFound`, all `OSError`); you used the API wrong (`StateError`).
+  Blocking timeouts raise the builtin `TimeoutError`.
+- **Skew fails first.** Mismatched runsomewhere versions refuse at handshake,
+  before any component starts.
+- **Secrets stay out of `ps`.** Worker configuration, including environment
+  values, travels over the protocol, never in argv.
 
-- **A new handshake with a version byte.** execnet ≤ 3 cannot be spoken to. Major
-  or minor skew between the two sides is refused, as in the execnet PR.
-- **Per-channel flow control, reserved now:** a credit window, granted by the
-  receiver. In the execnet PR a fast sender is buffered without limit on the other end.
-  Adding the space after the first release is the expensive way round.
-- **Entrypoint messages** carry an import path and keyword arguments. Source is a
-  separate message type, used only by `exec_source`.
-- **Infrastructure operations stay first-class messages,** as in the execnet PR: spawning
-  through a worker, socket handoff, and deploy.
+## What it costs, and what it is not
 
-## Errors
+- **A copy per item, even on a thread.** That is the price of identical
+  semantics. A thread fast path may later skip the encoding, still handing
+  over copies.
+- **Start cost follows isolation:** thread, subinterpreter, process, container,
+  remote host, roughly in that order. Components are meant to be long-lived;
+  if you would start one per request, you want a function call instead.
+- **Not remote procedure calls.** There is no "run this function over there
+  and return". If the far side is worth running elsewhere, it is worth being a
+  component with an interface.
+- **Not a security boundary.** Both sides are trusted.
+- **Not an object proxy.** You cannot hold a reference to a remote object.
+- **Not a scheduler or orchestrator.** You pick the place. There is no
+  cluster, no placement, no restart policy.
+- **Python 3.10 and newer,** on Linux, macOS and Windows.
 
-The execnet PR's taxonomy carries over unchanged. Every error answers one of three questions:
+## How it works
 
-- **The other side failed:** `RemoteError`, which carries the remote traceback as
-  text.
-- **The connection is gone:** `ChannelClosed`, `WorkerGone` (the PR's
-  `GatewayGone`), `HostNotFound`. All are `OSError` subclasses. Timeouts on the
-  blocking surface raise the builtin `TimeoutError`.
-- **The call was wrong:** `StateError`, which is not an `OSError`.
+One **engine thread** per process runs all protocol IO. Your code, async or
+blocking, hands work to it and waits; a slow caller never stalls the protocol.
+Trio users who want the IO in their own nursery can open a group with
+`inline=True`.
 
-## Dropped from execnet
+A **worker** is runsomewhere itself, installed in the target environment and
+started as `python -m cot.runsomewhere worker`. Both sides speak one protocol
+over a byte stream, whatever the place:
 
-- The `//` string DSL as the primary API, and the `id=` and `via=` spec keys.
-- `remote_exec` with source strings, functions or modules as the main path, and
-  the `__channelexec__` global injection.
-- `default_group` and module-level `makegateway`.
-- `Gateway`, which becomes `Worker`.
-- `MultiChannel`. Fan-out uses group helpers, such as `group.gather`.
-- `setcallback`, `makefile` and `receive(timeout=)` on async channels.
-- `RSync`, `set_execmodel`, `execmodel=`, `remote_init_threads`, `remote_status`
-  and `rinfo`.
-- Every compatibility shim and forwarding module, including `execnet.dumps`.
-- The gevent namespace. It comes back later, per the section above.
-- A public `ProtocolEngine`.
+| Place | Stream |
+|---|---|
+| thread, subinterpreter | in-memory pair |
+| process | socketpair (`socket.share()` on Windows) |
+| ssh | dial-back socket where possible, else stdio |
+| container | stdio via `podman run -i` / `podman exec -i` |
 
-## Build order
+The stream is kept off stdio where the place allows, so stray prints in a
+component cannot corrupt it. Frames are length-prefixed; the first exchange is
+a versioned handshake, then the configuration frame. Deploying, spawning
+through a worker and socket handoff are protocol operations, not code sent to
+run.
 
-The repository starts with this document and nothing else. Each step is its own
-pull request, green on its own, and ports what it needs from the execnet PR.
+## Status and open decisions
 
-1. **Skeleton.** Packaging, CI, pre-commit, the licence, and the
-   `runsomewhere worker|info` CLI stub.
-2. **Core.** The message framing, serializer and error types, then the protocol
-   engine on trio and asyncio, and a `Process` place over a socketpair. Nothing
-   else yet.
-3. **Entrypoints.** `call`, `open_channel` and `exec_source`, and their message
-   types. The handshake version byte and the flow-control credits land here,
-   before anything depends on the wire.
-4. **Surfaces.** The async surface, `runsomewhere.blocking` with its wait backend,
-   and `inline=True`.
-5. **In-process places.** `Thread`, then `Subinterpreter`.
-6. **Remote.** uv provisioning, `Ssh`, `worker.spawn` relaying, then `Deployment`
-   and `transfer`.
-7. **Containers.** Podman first, then docker.
-8. **Later:** kubernetes, the gevent backend, and the thread fast path.
+Build order, each step its own pull request: skeleton; core protocol with the
+`Process` place; components and channels; the async, blocking and inline
+surfaces; `Thread` and `Subinterpreter`; uv provisioning, `Ssh` and
+`Deployment`; podman then docker; later kubernetes and a gevent profile.
 
-## Open questions
+Proposed, not yet settled:
 
-1. **Minimum Python.** The execnet PR supports 3.10, running trio only below
-   3.11. Starting at 3.11 drops that split.
-2. **Thread fast path.** Do we keep copy semantics everywhere, as proposed, or
-   offer `Thread(shared=True)` for callers who want object sharing?
-3. **Greenlets.** Which does runsomewhere eventually need: gevent processes, the
-   greenback-style bridge, or both?
-4. **Entrypoint shape.** Is `call` versus `open_channel` the right split, or should
-   there be one call whose entrypoint decides by taking a `channel` parameter?
-5. **Kubernetes.** In-tree, or behind a documented transport extension point?
-6. **Import name.** `runsomewhere` is long for `import`. Should the docs use
-   `import runsomewhere as rs`, or should there be a short alias package?
-7. **Licence.** execnet is MIT. Code ported from the execnet PR keeps that
-   notice either way; does runsomewhere as a whole stay MIT?
+1. **Component naming.** Started by the import path of its main, as above, or
+   declared by the package under an entry-point group
+   (`[project.entry-points."cot.runsomewhere"] runner = "mypkg.testing.runner:main"`)
+   and started by name, so that only parts the system declares can be run
+   elsewhere.
+2. **Where a component's code runs inside its worker:** its own thread, the
+   worker's main thread, or a task on the worker's trio or asyncio loop,
+   chosen per component at start.
+3. Copy semantics on threads too, with no `Thread(shared=True)`.
+4. The engine written on anyio, which is what lets `inline=True` also work
+   under asyncio.
+5. Kubernetes (`kubectl exec -i`) in-tree after ssh and podman, with no public
+   transport extension point until an outside transport asks for one.
+6. No greenlet feature until someone asks; a gevent worker profile first if
+   they do.
