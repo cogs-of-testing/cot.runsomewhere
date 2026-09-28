@@ -78,7 +78,9 @@ async with gateway.open(Agent, verbose=True) as agent:
 
 `gateway.open` takes either a service name, and yields the channel, or a
 client class, and yields the client wrapping that channel. Leaving the block
-closes it. Service and client live in the same package, so
+closes it. `open` is only a context manager, never awaitable on its own: a
+channel or client always has a scope that closes it. Code holding several
+opens them in the tasks that use them. Service and client live in the same package, so
 the messages between them are that package's private protocol, versioned and
 tested together, and a caller only sees methods.
 

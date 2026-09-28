@@ -110,16 +110,15 @@ The distributed-test shape: N runners, each taking tests and reporting back,
 with the controller feeding work as runners free up.
 
 ```python
-async with rsh.open_group() as group, AsyncExitStack() as stack:
-    runners = [
-        await stack.enter_async_context(
-            (await group.spawn(rsh.Process())).open(Runner, root=".")
-        )
-        for _ in range(8)
-    ]
-    async with anyio.create_task_group() as tg:
-        for runner in runners:
-            tg.start_soon(drive, runner, schedule)
+async def runner_loop(group, schedule):
+    gateway = await group.spawn(rsh.Process())
+    async with gateway.open(Runner, root=".") as runner:
+        await drive(runner, schedule)
+
+
+async with rsh.open_group() as group, anyio.create_task_group() as tg:
+    for _ in range(8):
+        tg.start_soon(runner_loop, group, schedule)
 ```
 
 A runner that crashes, leaks or segfaults takes its own worker with it. The
@@ -130,15 +129,18 @@ reports.
 ### The same suite on a remote box, deployed
 
 ```python
-async with rsh.open_group() as group, AsyncExitStack() as stack:
+async def runner_loop(env, schedule):
+    gateway = await env.spawn(rsh.Process())
+    async with gateway.open(Runner, root=env.paths.root) as runner:
+        await drive(runner, schedule)
+
+
+async with rsh.open_group() as group:
     host = await group.spawn(rsh.Ssh("buildbox"))
     env = await host.deploy(rsh.Deployment(".", roots=["testing"]))
-    runners = [
-        await stack.enter_async_context(
-            (await env.spawn(rsh.Process())).open(Runner, root=env.paths.root)
-        )
-        for _ in range(16)
-    ]
+    async with anyio.create_task_group() as tg:
+        for _ in range(16):
+            tg.start_soon(runner_loop, env, schedule)
 ```
 
 The box has no install of the project yet, so this is the concession path:
