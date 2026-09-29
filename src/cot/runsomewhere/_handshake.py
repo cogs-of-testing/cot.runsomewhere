@@ -59,12 +59,14 @@ def _major_minor(version: str) -> tuple[str, ...]:
 def check_peer(*, local: Hello, remote: Hello) -> None:
     """Refuse a peer whose protocol or major.minor version differs."""
     if remote.protocol != local.protocol:
-        raise HandshakeRefused(
+        msg = (
             f"the other side speaks protocol {remote.protocol}, "
             f"this side speaks protocol {local.protocol}"
         )
+        raise HandshakeRefused(msg)
     if _major_minor(remote.version) != _major_minor(local.version):
-        raise HandshakeRefused(
+        msg = (
             f"the other side runs runsomewhere {remote.version}, this side "
             f"{local.version}; major and minor versions must match"
         )
+        raise HandshakeRefused(msg)

@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-import os
 import socket
 import subprocess
 import sys
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from importlib import import_module
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import anyio
 import anyio.abc
 from anyio.abc import SocketStream
 
 from ._errors import HostNotFound, StateError
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 
 @dataclass
@@ -30,14 +33,16 @@ class Place:
 
     def to_value(self) -> dict[str, Any]:
         """The place as a value, for a relay to launch it."""
-        raise TypeError(f"{type(self).__name__} places cannot be relayed yet")
+        msg = f"{type(self).__name__} places cannot be relayed yet"
+        raise TypeError(msg)
 
     def worker_config(self) -> dict[str, Any]:
         """Configuration for the worker, sent end to end in its first frame."""
         return {}
 
-    async def launch(self, task_group: anyio.abc.TaskGroup) -> Launched:
-        raise StateError(f"{type(self).__name__} places are not implemented yet")
+    async def launch(self, _task_group: anyio.abc.TaskGroup) -> Launched:
+        msg = f"{type(self).__name__} places are not implemented yet"
+        raise StateError(msg)
 
 
 _PLACES: dict[str, str] = {
@@ -47,8 +52,6 @@ _PLACES: dict[str, str] = {
 
 
 def place_from_value(value: dict[str, Any]) -> Place:
-    from importlib import import_module
-
     module, _, name = _PLACES[value["kind"]].partition(":")
     kind: type[Place] = getattr(import_module(module), name)
     fields = {key: item for key, item in value.items() if key != "kind"}
@@ -99,12 +102,13 @@ class Process(Place):
     def worker_config(self) -> dict[str, Any]:
         return {"env": dict(self.env)}
 
-    async def launch(self, task_group: anyio.abc.TaskGroup) -> Launched:
+    async def launch(self, _task_group: anyio.abc.TaskGroup) -> Launched:
         python = self.python or sys.executable
         if self.python is not None:
             await _check_interpreter(python)
         if sys.platform == "win32":
-            raise StateError("Process places on Windows are not implemented yet")
+            msg = "Process places on Windows are not implemented yet"
+            raise StateError(msg)
         ours, theirs = socket.socketpair()
         with theirs:
             process = await anyio.open_process(
@@ -139,8 +143,9 @@ class Process(Place):
 
 
 async def _check_interpreter(python: str) -> None:
-    if not os.path.exists(python):
-        raise HostNotFound(f"no interpreter at {python}")
+    if not Path(python).exists():
+        msg = f"no interpreter at {python}"
+        raise HostNotFound(msg)
     probe = await anyio.run_process(
         [python, "-c", "import cot.runsomewhere"],
         check=False,
@@ -149,7 +154,8 @@ async def _check_interpreter(python: str) -> None:
         stderr=subprocess.DEVNULL,
     )
     if probe.returncode != 0:
-        raise StateError(
+        msg = (
             f"{python} has no cot.runsomewhere installed; bootstrapping it is "
             "not implemented yet"
         )
+        raise StateError(msg)

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import anyio.abc
@@ -11,6 +10,9 @@ from .._places import Launched, Place
 from .._version import version as __version__
 from .._worker import WorkerCore
 from ._pipe import Pipe
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 
 @dataclass
@@ -32,9 +34,8 @@ class InLoop(Place):
 
     def to_value(self) -> dict[str, Any]:
         if self.services is not None or self.pipe is not None:
-            raise TypeError(
-                "an InLoop place with handler objects or a pipe cannot be sent"
-            )
+            msg = "an InLoop place with handler objects or a pipe cannot be sent"
+            raise TypeError(msg)
         return {"kind": self.kind, "worker_version": self.worker_version}
 
     async def launch(self, task_group: anyio.abc.TaskGroup) -> Launched:

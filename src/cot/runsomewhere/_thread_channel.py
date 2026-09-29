@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import anyio.from_thread
 
-from ._channels import Channel
 from ._errors import ChannelClosed
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from ._channels import Channel
 
 
 class ThreadChannel:
@@ -39,11 +42,11 @@ class ThreadChannel:
         return anyio.from_thread.run(receive)
 
     def __iter__(self) -> Iterator[Any]:
-        while True:
-            try:
+        try:
+            while True:
                 yield self.receive()
-            except ChannelClosed:
-                return
+        except ChannelClosed:
+            return
 
     def wait_closed(self, timeout: float | None = None) -> Any:
         self._raise_if_detached()

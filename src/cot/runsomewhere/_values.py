@@ -51,14 +51,15 @@ def encode(value: object, channels: ChannelToId | None = None) -> bytes:
     try:
         _encode(value, out, set(), channels)
     except RecursionError:
-        raise TypeError("value nests too deeply to send") from None
+        msg = "value nests too deeply to send"
+        raise TypeError(msg) from None
     return bytes(out)
 
 
 def can_send(value: object) -> bool:
     """Whether a value can cross a channel, checked without sending it."""
     try:
-        encode(value, channels=lambda channel: 0)
+        encode(value, channels=lambda _: 0)
     except TypeError:
         return False
     return True
@@ -90,7 +91,8 @@ def _encode(
         out += _BYTES + _U32.pack(len(value)) + value
     elif kind in _SEQUENCES or kind is dict:
         if id(value) in active:
-            raise TypeError("cannot send a container that contains itself")
+            msg = "cannot send a container that contains itself"
+            raise TypeError(msg)
         active.add(id(value))
         if kind is dict:
             assert isinstance(value, dict)
@@ -107,7 +109,8 @@ def _encode(
     elif channels is not None and is_channel(value):
         out += _CHANNEL + _U32.pack(channels(value))
     else:
-        raise TypeError(f"cannot send {kind.__qualname__} values: {value!r}")
+        msg = f"cannot send {kind.__qualname__} values: {value!r}"
+        raise TypeError(msg)
 
 
 def decode(data: bytes, channels: IdToChannel | None = None) -> Any:
@@ -116,9 +119,11 @@ def decode(data: bytes, channels: IdToChannel | None = None) -> Any:
     try:
         value = reader.value()
     except RecursionError:
-        raise DecodeError("value nests too deeply") from None
+        msg = "value nests too deeply"
+        raise DecodeError(msg) from None
     if reader.position != len(data):
-        raise DecodeError(f"{len(data) - reader.position} trailing bytes")
+        msg = f"{len(data) - reader.position} trailing bytes"
+        raise DecodeError(msg)
     return value
 
 
@@ -131,7 +136,8 @@ class _Reader:
     def take(self, count: int) -> bytes:
         end = self.position + count
         if end > len(self.data):
-            raise DecodeError("truncated value")
+            msg = "truncated value"
+            raise DecodeError(msg)
         chunk = self.data[self.position : end]
         self.position = end
         return chunk
@@ -170,7 +176,8 @@ class _Reader:
             try:
                 return kind(self.items())
             except TypeError as error:
-                raise DecodeError(f"unhashable set member: {error}") from None
+                msg = f"unhashable set member: {error}"
+                raise DecodeError(msg) from None
         if tag == _DICT:
             count = self.u32()
             result = {}
@@ -179,11 +186,13 @@ class _Reader:
                 try:
                     result[key] = self.value()
                 except TypeError as error:
-                    raise DecodeError(f"unhashable dict key: {error}") from None
+                    msg = f"unhashable dict key: {error}"
+                    raise DecodeError(msg) from None
             return result
         if tag == _CHANNEL and self.channels is not None:
             return self.channels(self.u32())
-        raise DecodeError(f"unknown tag {tag!r}")
+        msg = f"unknown tag {tag!r}"
+        raise DecodeError(msg)
 
     def items(self) -> list[Any]:
         return [self.value() for _ in range(self.u32())]

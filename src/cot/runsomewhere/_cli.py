@@ -10,22 +10,20 @@ import socket
 import sys
 import sysconfig
 
+import anyio
+from anyio.abc import SocketStream
+
 from ._version import version
+from ._worker import WorkerCore
 
 
 async def _serve_fd(fd: int) -> None:
-    from anyio.abc import SocketStream
-
-    from ._worker import WorkerCore
-
     # handed over as a socket, not a bare fd, so family and type are kept
     stream = await SocketStream.from_socket(socket.socket(fileno=fd))
     await WorkerCore(stream).run()
 
 
 def worker(arguments: argparse.Namespace) -> None:
-    import anyio
-
     anyio.run(_serve_fd, arguments.fd)
     sys.stdout.flush()
     sys.stderr.flush()
@@ -34,8 +32,8 @@ def worker(arguments: argparse.Namespace) -> None:
     os._exit(0)
 
 
-def info(arguments: argparse.Namespace) -> None:
-    print(
+def info(_arguments: argparse.Namespace) -> None:
+    sys.stdout.write(
         json.dumps(
             {
                 "runsomewhere": version,

@@ -1,9 +1,11 @@
+import re
 import threading
 
 import anyio
 import pytest
 
 from cot import runsomewhere as rsh
+from rsh_test_services import Echo
 
 from .conftest import inloop
 
@@ -43,7 +45,7 @@ async def test_unsendable_parameters_are_refused_before_sending():
 
 
 async def test_opening_an_unknown_service_is_a_state_error(gateway):
-    with pytest.raises(rsh.StateError, match="t.missing"):
+    with pytest.raises(rsh.StateError, match=re.escape("t.missing")):
         async with gateway.open("t.missing"):
             pass
 
@@ -74,7 +76,8 @@ async def test_sync_handlers_run_on_a_worker_thread_with_the_sync_channel_api():
         async with gateway.open("t.double") as channel:
             await channel.send(4)
             assert await channel.receive() == 8
-    assert ran_on and ran_on[0] != loop_thread
+    assert ran_on
+    assert ran_on[0] != loop_thread
 
 
 async def test_a_sync_handler_sees_channel_closed_when_the_caller_leaves():
@@ -107,17 +110,13 @@ async def test_every_open_is_its_own_handler_call():
 
 
 async def test_the_client_wraps_the_channel_of_its_service(gateway):
-    from rsh_test_services import Echo
-
     async with gateway.open(Echo) as echo:
         assert isinstance(echo, Echo)
         assert await echo.roundtrip({"a": 1}) == {"a": 1}
 
 
 async def test_a_client_for_a_service_not_offered_is_a_state_error():
-    from rsh_test_services import Echo
-
     async with inloop(services={}) as gateway:
-        with pytest.raises(rsh.StateError, match="rsh_test_services.echo"):
+        with pytest.raises(rsh.StateError, match=re.escape("rsh_test_services.echo")):
             async with gateway.open(Echo):
                 pass

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
 import struct
+import traceback
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -95,7 +97,8 @@ class Channel:
         """Wait for the peer to close; return its result or raise its error."""
         if self._peer_close is None and self._failure is None:
             if self._closed_locally:
-                raise ChannelClosed(f"{self!r} was closed by this side")
+                msg = f"{self!r} was closed by this side"
+                raise ChannelClosed(msg)
             await self._peer_closed.wait()
         if self._peer_close is not None:
             return self._close_result()
@@ -188,25 +191,27 @@ class Channel:
 
     def _raise_if_unusable(self) -> None:
         if self._closed_locally:
-            raise ChannelClosed(f"{self!r} was closed by this side")
+            msg = f"{self!r} was closed by this side"
+            raise ChannelClosed(msg)
         if self._peer_close is not None:
-            raise ChannelClosed(f"{self!r} was closed by the other side")
+            msg = f"{self!r} was closed by the other side"
+            raise ChannelClosed(msg)
         if self._failure is not None:
             raise self._failure
 
     def _raise_if_finished(self) -> None:
         if self._peer_close is not None:
             self._close_result()
-            raise ChannelClosed(f"{self!r} was closed by the other side")
+            msg = f"{self!r} was closed by the other side"
+            raise ChannelClosed(msg)
         if self._failure is not None:
             raise self._failure
         if self._closed_locally:
-            raise ChannelClosed(f"{self!r} was closed by this side")
+            msg = f"{self!r} was closed by this side"
+            raise ChannelClosed(msg)
 
 
 def _error_info(error: BaseException) -> dict[str, Any]:
-    import traceback
-
     return {
         "error": str(error),
         "type": type(error).__name__,
@@ -256,7 +261,8 @@ class Connection:
         # a sync handler holds its channels wrapped for its thread
         unwrapped: Channel = getattr(channel, "async_channel", channel)
         if unwrapped._connection is not self:
-            raise StateError(f"{unwrapped!r} belongs to another gateway")
+            msg = f"{unwrapped!r} belongs to another gateway"
+            raise StateError(msg)
         return unwrapped.id
 
     def _channel_for(self, channel_id: int) -> Channel:
@@ -271,10 +277,8 @@ class Connection:
     def send_frame(self, kind: FrameType, channel: int, payload: bytes = b"") -> None:
         if self.failure is not None:
             return
-        try:
+        with contextlib.suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
             self._outgoing_send.send_nowait(encode_frame(Frame(kind, channel, payload)))
-        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
-            pass
 
     def finish_sending(self) -> None:
         """Close the stream once everything queued so far is written."""
@@ -328,7 +332,8 @@ class Connection:
             self._control_send.send_nowait(frame)
         elif kind == FrameType.OPEN:
             if self._on_open is None:
-                raise FrameError("the caller was asked to open a channel")
+                msg = "the caller was asked to open a channel"
+                raise FrameError(msg)
             self._on_open(self._channel_for(frame.channel), frame.payload)
         elif kind == FrameType.DATA:
             channel = self._channels.get(frame.channel)
@@ -362,5 +367,6 @@ class Connection:
             assert self.failure is not None
             raise self.failure from None
         if frame.type != kind:
-            raise WorkerGone(f"expected a {kind.name} frame, got {frame.type.name}")
+            msg = f"expected a {kind.name} frame, got {frame.type.name}"
+            raise WorkerGone(msg)
         return frame

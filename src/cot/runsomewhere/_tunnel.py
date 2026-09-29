@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 import anyio
 import anyio.abc
 
-from ._channels import Channel
 from ._errors import ChannelClosed, RemoteError
 
 if TYPE_CHECKING:
+    from ._channels import Channel
     from ._places import Place
 
 
@@ -26,7 +26,7 @@ class ChannelByteStream(anyio.abc.ByteStream):
         except ChannelClosed:
             raise anyio.ClosedResourceError from None
 
-    async def receive(self, max_bytes: int = 65536) -> bytes:
+    async def receive(self, max_bytes: int = 65536) -> bytes:  # noqa: ARG002 - one item is one chunk
         try:
             data: bytes = await self.channel.receive()
         except (ChannelClosed, RemoteError):

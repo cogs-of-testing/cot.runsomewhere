@@ -10,13 +10,13 @@ runsomewhere is tested at five levels of isolation. The rule is to test a
 behaviour at the cheapest level that can show it, and most behaviour can be
 shown with nothing but async tasks in one event loop.
 
-| Level | Runs | Transport | Directory |
-|---|---|---|---|
-| 0 | sans-IO pieces: frame decoder, value codec, handshake checks | none; no event loop | `testing/unit/` |
-| 1 | caller and worker cores as tasks in the test's own loop | in-memory pipe with fault injection | `testing/inloop/` |
-| 2 | engine hosts and the sync facade | as the host provides | `testing/hosts/` |
-| 3 | real worker processes | socketpair, stdio | `testing/process/` |
-| 4 | ssh to an in-process server, containers | ssh, container stdio | `testing/remote/` |
+| Level | Runs                                                         | Transport                           | Directory          |
+| ----- | ------------------------------------------------------------ | ----------------------------------- | ------------------ |
+| 0     | sans-IO pieces: frame decoder, value codec, handshake checks | none; no event loop                 | `testing/unit/`    |
+| 1     | caller and worker cores as tasks in the test's own loop      | in-memory pipe with fault injection | `testing/inloop/`  |
+| 2     | engine hosts and the sync facade                             | as the host provides                | `testing/hosts/`   |
+| 3     | real worker processes                                        | socketpair, stdio                   | `testing/process/` |
+| 4     | ssh to an in-process server, containers                      | ssh, container stdio                | `testing/remote/`  |
 
 Every async test runs twice, under asyncio and under trio, through anyio's
 pytest plugin. A behaviour that holds on one loop and not the other is a bug.

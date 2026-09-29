@@ -46,6 +46,7 @@ test = [
 ]
 lint = [
   "mypy>=1.15",
+  "nox>=2025",
   "pre-commit>=4",
 ]
 docs = [
@@ -68,12 +69,53 @@ sources.rsh-test-services = { workspace = true }
 line-length = 88
 src = [ "src", "testing" ]
 lint.extend-select = [
-  "B",
-  "I",
-  "UP",
+  "ARG",  # flake8-unused-arguments
+  "B",    # flake8-bugbear
+  "BLE",  # flake8-blind-except
+  "C4",   # flake8-comprehensions
+  "DTZ",  # flake8-datetimez
+  "EM",   # flake8-errmsg
+  "EXE",  # flake8-executable
+  "FA",   # flake8-future-annotations
+  "FLY",  # flynt
+  "FURB", # refurb
+  "G",    # flake8-logging-format
+  "I",    # isort
+  "ICN",  # flake8-import-conventions
+  "ISC",  # flake8-implicit-str-concat
+  "LOG",  # flake8-logging
+  "NPY",  # NumPy specific rules
+  "PD",   # pandas-vet
+  "PERF", # perflint
+  "PGH",  # pygrep-hooks
+  "PIE",  # flake8-pie
+  "PL",   # pylint
+  "PT",   # flake8-pytest-style
+  "PTH",  # flake8-use-pathlib
+  "PYI",  # flake8-pyi
+  "Q",    # flake8-quotes
+  "RET",  # flake8-return
+  "RSE",  # flake8-raise
+  "RUF",  # Ruff-specific
+  "SIM",  # flake8-simplify
+  "SLOT", # flake8-slots
+  "T10",  # flake8-debugger
+  "T20",  # flake8-print
+  "TC",   # flake8-type-checking
+  "TRY",  # tryceratops
+  "UP",   # pyupgrade
+  "YTT",  # flake8-2020
 ]
-# nested blocks are deliberate: each one is the scope of one resource
-lint.ignore = [ "SIM117" ]
+lint.ignore = [
+  "ISC001",  # conflicts with the formatter
+  "PLR09",   # complexity counts, as the Scientific Python guide leaves them
+  "PLR2004", # magic values, likewise
+  "SIM117",  # nested blocks are deliberate: each is the scope of one resource
+]
+# handlers and sent functions take `channel` whether they use it or not
+lint.per-file-ignores."testing/**" = [ "ARG" ]
+# noisy_echo prints on purpose: the protocol must survive it
+lint.per-file-ignores."testing/rsh_test_services/**" = [ "ARG", "T20" ]
 lint.isort.known-first-party = [ "cot", "rsh_test_services" ]
 
 [tool.pytest]
@@ -92,16 +134,3 @@ files = [ "src" ]
 strict = true
 warn_unreachable = true
 enable_error_code = [ "ignore-without-code", "redundant-expr", "truthy-bool" ]
-
-[tool.repo-review]
-# not adopted yet: each adds a tool or service the project has not chosen
-ignore = [
-  "GH200",  # Dependabot
-  "PC160",  # spell checker
-  "PC170",  # pygrep hooks, for rST
-  "PC180",  # markdown formatter
-  "PC901",  # pre-commit.ci
-  "PC902",
-  "PC903",
-  "PY007",  # task runner
-]

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from types import TracebackType
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
 
 import anyio
@@ -23,6 +21,9 @@ from ._values import decode, encode
 from ._version import version as __version__
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
+    from types import TracebackType
+
     from typing_extensions import Self
 
 if sys.version_info < (3, 11):
@@ -66,19 +67,6 @@ class WorkerInfo:
         )
 
 
-def open_group(*, engine: Any = None) -> Any:
-    """The scope gateways are spawned in.
-
-    With an engine, the protocol runs in that engine host rather than in the
-    caller's loop.
-    """
-    if engine is None:
-        return Group()
-    from ._engine import AsyncHostedGroup
-
-    return AsyncHostedGroup(engine)
-
-
 class Group:
     def __init__(self) -> None:
         self._task_group: anyio.abc.TaskGroup | None = None
@@ -115,12 +103,14 @@ class Group:
         close_timeout: float = DEFAULT_CLOSE_TIMEOUT,
     ) -> _Spawn:
         if deploy is not None:
-            raise StateError("deploying on spawn is not implemented yet")
+            msg = "deploying on spawn is not implemented yet"
+            raise StateError(msg)
         return _Spawn(self, place, place.launch, services, close_timeout)
 
     def _tasks(self) -> anyio.abc.TaskGroup:
         if self._task_group is None or self._closed:
-            raise StateError("the group is not open")
+            msg = "the group is not open"
+            raise StateError(msg)
         return self._task_group
 
 
@@ -172,11 +162,11 @@ class Gateway:
     ) -> _Spawn:
         """Spawn a worker reachable from this one, tunnelled through it."""
 
-        async def launch(task_group: anyio.abc.TaskGroup) -> Launched:
+        async def launch(_task_group: anyio.abc.TaskGroup) -> Launched:
             self._require("rsh.via")
             channel = await self._open_channel("rsh.via", {"place": place.to_value()})
 
-            async def close(timeout: float) -> None:
+            async def close(_timeout: float) -> None:
                 channel.close()
 
             return Launched(ChannelByteStream(channel), close)
@@ -191,11 +181,13 @@ class Gateway:
     def _require(self, service: str) -> None:
         self._raise_if_unusable()
         if service not in self.services:
-            raise StateError(f"this worker does not offer the service {service!r}")
+            msg = f"this worker does not offer the service {service!r}"
+            raise StateError(msg)
 
     def _raise_if_unusable(self) -> None:
         if self._closed:
-            raise StateError(f"{self!r} is closed")
+            msg = f"{self!r} is closed"
+            raise StateError(msg)
         if self._connection.failure is not None:
             raise self._connection.failure
 
@@ -228,6 +220,13 @@ class _Open(Generic[OpenedT]):
     async def __aexit__(self, *exc_info: object) -> None:
         assert self._channel is not None
         await self._channel.aclose()
+
+
+def _accepted(answer: dict[str, Any]) -> dict[str, Any]:
+    """The worker's answer to the configuration, unless it refused."""
+    if not answer["ok"]:
+        raise HandshakeRefused(answer["error"])
+    return answer
 
 
 class _Spawn:
@@ -271,9 +270,9 @@ class _Spawn:
                 **self._place.worker_config(),
             }
             connection.send_frame(FrameType.CONFIG, 0, encode(config))
-            answer = decode((await connection.next_control(FrameType.CONFIG)).payload)
-            if not answer["ok"]:
-                raise HandshakeRefused(answer["error"])
+            answer = _accepted(
+                decode((await connection.next_control(FrameType.CONFIG)).payload)
+            )
         except BaseException:
             with anyio.CancelScope(shield=True):
                 await self._close(graceful=False)

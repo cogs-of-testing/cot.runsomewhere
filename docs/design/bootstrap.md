@@ -132,8 +132,7 @@ is built from it with uv:
   for the target's platform, the same way as any other; its binary is in the
   wheel.
 - The host worker runs uv to get the Python (`python=`), create the
-  environment and apply the lockfile, with `uv sync --frozen` or `uv pip
-  install` of the wheels it already has.
+  environment and apply the lockfile, with `uv sync --frozen` or `uv pip install` of the wheels it already has.
 - The workers that run services start inside that environment, spawned
   through the host worker ([relaying](relaying.md)), and again start from
   runsomewhere's `worker` entry point.
@@ -173,12 +172,12 @@ Whichever way a worker started, the handshake runs on the stream it was
 given: version check, then the configuration frame. Where the place allows,
 the protocol then moves off stdio:
 
-| Place | Protocol stream |
-|---|---|
-| local process, POSIX | the inherited socketpair, from the start |
-| local process, Windows | a socket duplicated into the child with `socket.share()`, falling back to stdio where that fails |
-| ssh, POSIX | a unix socket forwarded back with `ssh -R`, dialled by the worker |
-| ssh to Windows, container | stdio |
+| Place                     | Protocol stream                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------ |
+| local process, POSIX      | the inherited socketpair, from the start                                                         |
+| local process, Windows    | a socket duplicated into the child with `socket.share()`, falling back to stdio where that fails |
+| ssh, POSIX                | a unix socket forwarded back with `ssh -R`, dialled by the worker                                |
+| ssh to Windows, container | stdio                                                                                            |
 
 On stdio, the worker moves the protocol off fd 0 and 1 before running
 anything else, so a stray `print` cannot corrupt the stream.

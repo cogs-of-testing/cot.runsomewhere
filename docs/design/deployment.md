@@ -40,11 +40,11 @@ string, for command lines and configuration files.
 
 `python=` is interpreted on the target, not on the caller:
 
-| Value | Means |
-|---|---|
-| omitted | for `Process`: the caller's own interpreter and environment. Elsewhere: whatever uv picks by default there |
+| Value                              | Means                                                                                                                |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| omitted                            | for `Process`: the caller's own interpreter and environment. Elsewhere: whatever uv picks by default there           |
 | `"3.12"`, `">=3.11"`, `"pypy3.10"` | a version request, resolved by uv on the target: an installed interpreter if one matches, a uv-managed one otherwise |
-| `"/usr/bin/python3"` | exactly that interpreter |
+| `"/usr/bin/python3"`               | exactly that interpreter                                                                                             |
 
 Omitted `python=` on a local `Process` is the one case that needs no uv at
 all: the worker is `sys.executable -m cot.runsomewhere worker` in the

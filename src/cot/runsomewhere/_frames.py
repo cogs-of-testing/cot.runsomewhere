@@ -36,9 +36,8 @@ class Frame(NamedTuple):
 
 def encode_frame(frame: Frame) -> bytes:
     if len(frame.payload) > MAX_PAYLOAD:
-        raise FrameError(
-            f"payload too large: {len(frame.payload)} bytes, limit {MAX_PAYLOAD}"
-        )
+        msg = f"payload too large: {len(frame.payload)} bytes, limit {MAX_PAYLOAD}"
+        raise FrameError(msg)
     return HEADER.pack(frame.type, frame.channel, len(frame.payload)) + frame.payload
 
 
@@ -66,14 +65,14 @@ class FrameDecoder:
             # other end fails on its first write rather than on a full frame
             head = bytes(self._buffer[: len(MAGIC)])
             if not MAGIC.startswith(head):
-                raise FrameError(f"not a runsomewhere stream: starts with {head!r}")
+                msg = f"not a runsomewhere stream: starts with {head!r}"
+                raise FrameError(msg)
             if len(self._buffer) < len(PREAMBLE):
                 return []
             version = self._buffer[len(MAGIC)]
             if version != PROTOCOL_VERSION:
-                raise FrameError(
-                    f"protocol version {version}, this side speaks {PROTOCOL_VERSION}"
-                )
+                msg = f"protocol version {version}, this side speaks {PROTOCOL_VERSION}"
+                raise FrameError(msg)
             del self._buffer[: len(PREAMBLE)]
             self._seen_preamble = True
 
@@ -83,11 +82,11 @@ class FrameDecoder:
             try:
                 frame_type = FrameType(kind)
             except ValueError:
-                raise FrameError(f"unknown frame type {kind}") from None
+                msg = f"unknown frame type {kind}"
+                raise FrameError(msg) from None
             if length > MAX_PAYLOAD:
-                raise FrameError(
-                    f"frame too large: {length} bytes, limit {MAX_PAYLOAD}"
-                )
+                msg = f"frame too large: {length} bytes, limit {MAX_PAYLOAD}"
+                raise FrameError(msg)
             end = HEADER_SIZE + length
             if len(self._buffer) < end:
                 break

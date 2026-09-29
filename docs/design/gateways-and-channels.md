@@ -157,11 +157,11 @@ been written entirely or not at all.
 
 Every frame is a fixed header and a payload:
 
-| Field | Size | Meaning |
-|---|---|---|
-| type | 1 byte | hello, config, open, data, credit, close, gateway-close |
-| channel | 4 bytes | channel id; 0 for gateway-level frames |
-| length | 4 bytes | payload length |
+| Field   | Size    | Meaning                                                 |
+| ------- | ------- | ------------------------------------------------------- |
+| type    | 1 byte  | hello, config, open, data, credit, close, gateway-close |
+| channel | 4 bytes | channel id; 0 for gateway-level frames                  |
+| length  | 4 bytes | payload length                                          |
 
 The decoder is sans-IO: it takes bytes and yields frames, never reads or
 waits, so every transport and every event loop uses the same one.
@@ -178,12 +178,12 @@ message instead of a garbled frame.
 
 ## Errors
 
-| Situation | Error |
-|---|---|
-| The far side raised, or closed with an error | `RemoteError`, with the remote traceback as text |
-| The channel was closed | `ChannelClosed` (an `OSError`) |
-| The worker or the link is gone | `WorkerGone` (an `OSError`) |
-| A place could not be reached at all | `HostNotFound` (an `OSError`) |
+| Situation                                                         | Error                                                   |
+| ----------------------------------------------------------------- | ------------------------------------------------------- |
+| The far side raised, or closed with an error                      | `RemoteError`, with the remote traceback as text        |
+| The channel was closed                                            | `ChannelClosed` (an `OSError`)                          |
+| The worker or the link is gone                                    | `WorkerGone` (an `OSError`)                             |
+| A place could not be reached at all                               | `HostNotFound` (an `OSError`)                           |
 | The other side's protocol or runsomewhere version is incompatible | `HandshakeRefused` (an `OSError`), naming both versions |
-| Wrong use: closed channel, foreign gateway, unknown service | `StateError` |
-| A sync-facade timeout | builtin `TimeoutError` |
+| Wrong use: closed channel, foreign gateway, unknown service       | `StateError`                                            |
+| A sync-facade timeout                                             | builtin `TimeoutError`                                  |

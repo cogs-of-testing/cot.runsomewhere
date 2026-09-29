@@ -9,13 +9,15 @@ import itertools
 import textwrap
 import types
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import anyio.to_thread
 
-from ._channels import Channel
 from ._thread_channel import ThreadChannel
+
+if TYPE_CHECKING:
+    from ._channels import Channel
 
 Code = str | types.ModuleType | Callable[..., Any]
 
@@ -31,24 +33,30 @@ def prepare(code: Code, kwargs: dict[str, Any]) -> dict[str, Any]:
     elif isinstance(code, str):
         source = textwrap.dedent(code)
     else:
-        raise TypeError(f"cannot remote_exec {type(code).__qualname__} objects")
+        msg = f"cannot remote_exec {type(code).__qualname__} objects"
+        raise TypeError(msg)
     if call is None and kwargs:
-        raise TypeError("keyword arguments are only passed to functions")
+        msg = "keyword arguments are only passed to functions"
+        raise TypeError(msg)
     return {"source": source, "call": call, "kwargs": kwargs}
 
 
 def _source_of_function(function: types.FunctionType) -> str:
     if function.__name__ == "<lambda>":
-        raise ValueError("a lambda cannot be sent; define a function")
+        msg = "a lambda cannot be sent; define a function"
+        raise ValueError(msg)
     parameters = list(inspect.signature(function).parameters)
     if not parameters or parameters[0] != "channel":
-        raise ValueError(f"{function.__name__} must take `channel` first")
+        msg = f"{function.__name__} must take `channel` first"
+        raise ValueError(msg)
     if function.__closure__ is not None:
-        raise ValueError(f"{function.__name__} uses a closure, which cannot be sent")
+        msg = f"{function.__name__} uses a closure, which cannot be sent"
+        raise ValueError(msg)
     try:
         source = textwrap.dedent(inspect.getsource(function))
     except OSError as error:
-        raise ValueError(f"cannot find the source of {function.__name__}") from error
+        msg = f"cannot find the source of {function.__name__}"
+        raise ValueError(msg) from error
     local_names = set(function.__code__.co_varnames)
     used_globals = sorted(
         {
@@ -60,10 +68,11 @@ def _source_of_function(function: types.FunctionType) -> str:
         }
     )
     if used_globals:
-        raise ValueError(
+        msg = (
             f"{function.__name__} uses non-builtin globals, which cannot be "
             f"sent: {', '.join(used_globals)}"
         )
+        raise ValueError(msg)
     return source
 
 

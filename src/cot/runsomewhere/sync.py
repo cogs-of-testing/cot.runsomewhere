@@ -6,33 +6,34 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Iterator
-from types import TracebackType
 from typing import TYPE_CHECKING, Any
+
+import anyio
 
 from ._engine import Host, SubinterpreterEngine, ThreadEngine, host_for
 from ._errors import ChannelClosed, StateError
 from ._gateway import WorkerInfo
-from ._places import Place
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from typing_extensions import Self
+
+    from ._places import Place
 
 __all__ = ["open_group"]
 
 
 def _refuse_inside_event_loop() -> None:
     try:
-        import sniffio
-    except ImportError:  # pragma: no cover - anyio brings it
+        anyio.get_current_task()
+    except RuntimeError:
         return
-    try:
-        library = sniffio.current_async_library()
-    except sniffio.AsyncLibraryNotFoundError:
-        return
-    raise StateError(
-        f"the sync facade would stall the running {library} loop; use the async "
+    msg = (
+        "the sync facade would stall the running event loop; use the async "
         "API, `async with rsh.open_group()`"
     )
+    raise StateError(msg)
 
 
 def open_group(*, engine: ThreadEngine | SubinterpreterEngine | None = None) -> Group:
@@ -85,7 +86,8 @@ class Group:
     ) -> _Scope:
         engine = self.engine
         if engine is None:
-            raise StateError("the group is not open")
+            msg = "the group is not open"
+            raise StateError(msg)
 
         def enter() -> tuple[int, Gateway]:
             handle, info, offered = engine.call(
@@ -135,11 +137,11 @@ class Channel:
         return self._engine.call("wait_closed", self._handle, timeout)
 
     def __iter__(self) -> Iterator[Any]:
-        while True:
-            try:
+        try:
+            while True:
                 yield self.receive()
-            except ChannelClosed:
-                return
+        except ChannelClosed:
+            return
 
 
 class _NonSuspending:
@@ -183,7 +185,8 @@ def _drive(coroutine: Coroutine[Any, Any, Any]) -> Any:
     except StopIteration as done:
         return done.value
     coroutine.close()
-    raise StateError(
+    msg = (
         "a client method awaited something other than its channel, which the "
         "sync facade cannot run"
     )
+    raise StateError(msg)

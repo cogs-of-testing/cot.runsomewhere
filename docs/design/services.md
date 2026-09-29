@@ -105,14 +105,14 @@ of `rsh.remote_exec`.
 
 Names starting with `rsh.` are reserved.
 
-| Service | Does | Default |
-|---|---|---|
-| `rsh.info` | reports version, Python, platform and services | on |
-| `rsh.via` | spawns a worker reachable from this one and tunnels its gateway ([relaying](relaying.md)) | on |
-| `rsh.deploy` | builds an environment and installs into it ([deployment](deployment.md)) | on |
-| `rsh.transfer` | receives a file tree, diff-only ([deployment](deployment.md)) | on |
-| `rsh.proxy` | connects to an address reachable from this worker and carries the bytes ([relaying](relaying.md)) | off |
-| `rsh.remote_exec` | runs code sent by the caller ([remote exec](remote-exec.md)) | off |
+| Service           | Does                                                                                              | Default |
+| ----------------- | ------------------------------------------------------------------------------------------------- | ------- |
+| `rsh.info`        | reports version, Python, platform and services                                                    | on      |
+| `rsh.via`         | spawns a worker reachable from this one and tunnels its gateway ([relaying](relaying.md))         | on      |
+| `rsh.deploy`      | builds an environment and installs into it ([deployment](deployment.md))                          | on      |
+| `rsh.transfer`    | receives a file tree, diff-only ([deployment](deployment.md))                                     | on      |
+| `rsh.proxy`       | connects to an address reachable from this worker and carries the bytes ([relaying](relaying.md)) | off     |
+| `rsh.remote_exec` | runs code sent by the caller ([remote exec](remote-exec.md))                                      | off     |
 
 The caller decides, per worker at spawn, which services are enabled:
 

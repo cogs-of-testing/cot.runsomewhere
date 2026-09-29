@@ -14,7 +14,6 @@ import importlib
 import itertools
 import queue
 import threading
-from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -23,10 +22,13 @@ import anyio.to_thread
 
 from . import _errors
 from ._errors import StateError
+from ._gateway import Group, WorkerInfo
 from ._places import Place, place_from_value
 from ._values import decode, encode
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+
     from typing_extensions import Self
 
 Message = tuple[Any, ...]
@@ -128,9 +130,7 @@ class HostServer:
         return handle, holder.value
 
     async def op_open_group(self) -> int:
-        from ._gateway import open_group
-
-        handle, _ = await self._hold(open_group())
+        handle, _ = await self._hold(Group())
         return handle
 
     async def op_spawn(
@@ -254,7 +254,8 @@ class _Pending:
         if self._status == "error":
             _raise_error(self._payload)
         if self._status == "cancelled":
-            raise StateError("the request was cancelled")
+            msg = "the request was cancelled"
+            raise StateError(msg)
         return self._payload
 
 
@@ -293,9 +294,8 @@ class Host:
         try:
             interpreters: Any = importlib.import_module("concurrent.interpreters")
         except ImportError:
-            raise StateError(
-                "the subinterpreter engine needs Python 3.14 or newer"
-            ) from None
+            msg = "the subinterpreter engine needs Python 3.14 or newer"
+            raise StateError(msg) from None
         requests = interpreters.create_queue()
         responses = interpreters.create_queue()
         self._interpreter = interpreters.create()
@@ -334,10 +334,11 @@ class Host:
         except TypeError as unsendable:
             with self._lock:
                 del self._pending[pending.request_id]
-            raise StateError(
+            msg = (
                 f"{unsendable}; values crossing into a subinterpreter engine "
                 "host must be sendable"
-            ) from None
+            )
+            raise StateError(msg) from None
         return pending
 
     def call(self, op: str, *args: Any) -> Any:
@@ -360,9 +361,8 @@ class Host:
         try:
             return place.to_value()
         except TypeError as error:
-            raise StateError(
-                f"{error}: it cannot cross into a subinterpreter engine host"
-            ) from None
+            msg = f"{error}: it cannot cross into a subinterpreter engine host"
+            raise StateError(msg) from None
 
     def shutdown(self) -> None:
         self._put(None)
@@ -421,8 +421,6 @@ class AsyncHostedGateway:
     def __init__(
         self, engine: Host, handle: int, info: dict[str, Any], services: frozenset[str]
     ) -> None:
-        from ._gateway import WorkerInfo
-
         self._engine = engine
         self._handle = handle
         self.worker = WorkerInfo(**info)

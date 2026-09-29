@@ -9,9 +9,9 @@ Status: design. Decisions marked **proposed** are open for review.
 Two services let a worker reach further on the caller's behalf. Both carry a
 byte stream over one channel, and neither looks inside it.
 
-| Service | Reaches | The caller gets |
-|---|---|---|
-| `rsh.via` | a new worker, started from this one | a gateway to that worker |
+| Service     | Reaches                               | The caller gets                |
+| ----------- | ------------------------------------- | ------------------------------ |
+| `rsh.via`   | a new worker, started from this one   | a gateway to that worker       |
 | `rsh.proxy` | an address reachable from this worker | a byte stream, or a local port |
 
 ## via: workers spawned through a worker

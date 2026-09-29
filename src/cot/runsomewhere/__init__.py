@@ -14,7 +14,8 @@ from ._errors import (
     StateError,
     WorkerGone,
 )
-from ._gateway import Client, Gateway, Group, WorkerInfo, open_group
+from ._gateway import Client, Gateway, Group, WorkerInfo
+from ._open import open_group
 from ._places import Container, Place, Process, Ssh, Subinterpreter, Thread
 from ._values import can_send
 from ._version import version as __version__

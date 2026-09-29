@@ -290,17 +290,16 @@ plugins may also crash. The isolation is for state, not hostile code.
 
 ## The parts
 
-| Document | Covers |
-|---|---|
-| [API surfaces and engine hosts](surfaces.md) | the async core, thread and subinterpreter engine hosts, the sync and async facades |
-| [Gateways and channels](gateways-and-channels.md) | worker and gateway, the gateway's lifecycle and output, channels, flow control, the wire, errors |
-| [Services](services.md) | declaring services, channels and clients, built-in services, where handlers run, stopping |
-| [Remote exec](remote-exec.md) | running strings, modules and functions sent by the caller; off by default |
-| [Relaying](relaying.md) | `via`: workers spawned through workers; `proxy`: connections from a worker's vantage point |
-| [Places, interpreters and deployment](deployment.md) | referring to hosts, containers and interpreters; environments; deploying a project |
-| [Bootstrapping](bootstrap.md) | using an existing install; the ladder from stdin and sockets to importable wheels when there is none |
-| [Testing](testing.md) | isolation levels, the in-loop harness `cot.runsomewhere.testing`, fault injection |
-
+| Document                                             | Covers                                                                                               |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| [API surfaces and engine hosts](surfaces.md)         | the async core, thread and subinterpreter engine hosts, the sync and async facades                   |
+| [Gateways and channels](gateways-and-channels.md)    | worker and gateway, the gateway's lifecycle and output, channels, flow control, the wire, errors     |
+| [Services](services.md)                              | declaring services, channels and clients, built-in services, where handlers run, stopping            |
+| [Remote exec](remote-exec.md)                        | running strings, modules and functions sent by the caller; off by default                            |
+| [Relaying](relaying.md)                              | `via`: workers spawned through workers; `proxy`: connections from a worker's vantage point           |
+| [Places, interpreters and deployment](deployment.md) | referring to hosts, containers and interpreters; environments; deploying a project                   |
+| [Bootstrapping](bootstrap.md)                        | using an existing install; the ladder from stdin and sockets to importable wheels when there is none |
+| [Testing](testing.md)                                | isolation levels, the in-loop harness `cot.runsomewhere.testing`, fault injection                    |
 
 ## Status and open decisions
 

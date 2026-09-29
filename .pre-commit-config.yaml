@@ -1,3 +1,8 @@
+ci:
+  autoupdate_commit_msg: "chore(deps): update pre-commit hooks"
+  autofix_commit_msg: "style: pre-commit fixes"
+  autoupdate_schedule: monthly
+
 repos:
 - repo: https://github.com/pre-commit/pre-commit-hooks
   rev: v6.0.0
@@ -35,3 +40,26 @@ repos:
   rev: 2026.08.14
   hooks:
     - id: sp-repo-review
+
+- repo: https://github.com/pre-commit/pygrep-hooks
+  rev: v1.10.0
+  hooks:
+    - id: python-check-blanket-noqa
+    - id: python-check-blanket-type-ignore
+    - id: rst-backticks
+    - id: rst-directive-colons
+    - id: rst-inline-touching-normal
+
+- repo: https://github.com/crate-ci/typos
+  rev: v1.50.3
+  hooks:
+    - id: typos
+
+- repo: https://github.com/hukkin/mdformat
+  rev: 1.0.0
+  hooks:
+    - id: mdformat
+      # consecutive numbers keep ordered lists readable as plain text
+      args: [ --number ]
+      additional_dependencies:
+        - mdformat-gfm

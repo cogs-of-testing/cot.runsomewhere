@@ -5,6 +5,7 @@ import pytest
 
 from cot import runsomewhere as rsh
 from cot.runsomewhere import testing as rsht
+from rsh_test_services import Echo
 
 
 def test_the_sync_facade_has_the_async_shape_without_await(engine):
@@ -16,8 +17,6 @@ def test_the_sync_facade_has_the_async_shape_without_await(engine):
 
 
 def test_clients_are_wrapped_for_the_sync_facade(engine):
-    from rsh_test_services import Echo
-
     with rsh.sync.open_group(engine=engine) as group:
         with group.spawn(rsht.InLoop()) as gateway:
             with gateway.open(Echo) as echo:

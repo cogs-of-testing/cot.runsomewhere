@@ -67,7 +67,8 @@ class _End(anyio.abc.ByteStream):
     async def send(self, item: bytes) -> None:
         await checkpoint()
         if self._pipe._cut or self._outgoing.eof:
-            raise anyio.BrokenResourceError("the pipe is cut")
+            msg = "the pipe is cut"
+            raise anyio.BrokenResourceError(msg)
         self._outgoing.buffer += item
         self._outgoing.wake()
 

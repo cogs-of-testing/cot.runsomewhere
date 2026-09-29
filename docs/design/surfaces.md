@@ -43,9 +43,9 @@ main interpreter                        engine host
 
 Two hosts:
 
-| Host | Runs the core in | Messages cross as | Available |
-|---|---|---|---|
-| thread | an event loop on a dedicated OS thread | objects, through thread-safe queues | always |
+| Host           | Runs the core in                                        | Messages cross as                             | Available                                |
+| -------------- | ------------------------------------------------------- | --------------------------------------------- | ---------------------------------------- |
+| thread         | an event loop on a dedicated OS thread                  | objects, through thread-safe queues           | always                                   |
 | subinterpreter | an event loop in its own interpreter, on its own thread | frames as `bytes`, through interpreter queues | Python 3.14+ (`concurrent.interpreters`) |
 
 In a subinterpreter host, the engine does the IO, framing, flow control and

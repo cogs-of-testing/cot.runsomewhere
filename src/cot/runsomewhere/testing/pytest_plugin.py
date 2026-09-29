@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 import pytest
 
-from .. import _gateway
+from .._gateway import Group
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 
 @pytest.fixture
-async def rsh_group() -> AsyncIterator[_gateway.Group]:
+async def rsh_group() -> AsyncIterator[Group]:
     """An open group in the test's event loop, closed at teardown."""
-    async with _gateway.open_group() as group:
+    async with Group() as group:
         yield group

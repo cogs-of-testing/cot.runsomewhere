@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from cot import runsomewhere as rsh
@@ -24,11 +26,12 @@ async def async_double(channel, value):
 
 
 def raises(channel):
-    raise KeyError("missing")
+    msg = "missing"
+    raise KeyError(msg)
 
 
 async def test_remote_exec_is_refused_where_not_enabled(gateway):
-    with pytest.raises(rsh.StateError, match="rsh.remote_exec"):
+    with pytest.raises(rsh.StateError, match=re.escape("rsh.remote_exec")):
         async with gateway.remote_exec("pass"):
             pass
 

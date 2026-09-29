@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import os
 from collections.abc import Callable, Mapping
@@ -17,7 +18,9 @@ from ._channels import Channel, Connection
 from ._errors import HandshakeRefused
 from ._frames import FrameType
 from ._handshake import Hello, check_peer
+from ._places import place_from_value
 from ._thread_channel import ThreadChannel
+from ._tunnel import relay
 from ._values import decode, encode
 from ._version import version as __version__
 
@@ -94,10 +97,8 @@ class WorkerCore:
         )
         async with anyio.create_task_group() as handlers:
             self._task_group = handlers
-            try:
+            with contextlib.suppress(OSError):
                 await connection.next_control(FrameType.GATEWAY_CLOSE)
-            except OSError:
-                pass
             handlers.cancel_scope.cancel()
 
     # -- services -------------------------------------------------------------
@@ -132,7 +133,8 @@ class WorkerCore:
         scope: anyio.CancelScope,
     ) -> Any:
         if name not in self._enabled:
-            raise LookupError(f"this worker does not offer the service {name!r}")
+            msg = f"this worker does not offer the service {name!r}"
+            raise LookupError(msg)
         builtin = _BUILTIN_HANDLERS.get(name)
         if builtin is not None:
             return await builtin(self, channel, **params)
@@ -148,20 +150,18 @@ class WorkerCore:
             lambda: handler(ThreadChannel(channel), **params), abandon_on_cancel=True
         )
 
-    async def _info(self, channel: Channel) -> Any:
+    async def _info(self, _channel: Channel) -> Any:
         return self._hello.to_value()
 
     async def _remote_exec(self, channel: Channel, **request: Any) -> Any:
         return await _remote_exec.serve(channel, **request)
 
     async def _via(self, channel: Channel, *, place: dict[str, Any]) -> None:
-        from ._places import place_from_value
-        from ._tunnel import relay
-
         await relay(channel, place_from_value(place))
 
     async def _not_yet(self, channel: Channel, **params: Any) -> None:
-        raise NotImplementedError("this built-in service is not implemented yet")
+        msg = "this built-in service is not implemented yet"
+        raise NotImplementedError(msg)
 
 
 _BUILTIN_HANDLERS: dict[str, Callable[..., Any]] = {
