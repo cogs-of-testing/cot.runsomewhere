@@ -34,7 +34,6 @@ dependencies = [
 urls.Documentation = "https://github.com/cogs-of-testing/cot.runsomewhere/tree/main/docs"
 urls.Source = "https://github.com/cogs-of-testing/cot.runsomewhere"
 scripts.runsomewhere = "cot.runsomewhere._cli:main"
-entry-points.pytest11.cot_runsomewhere = "cot.runsomewhere.testing.pytest_plugin"
 
 [dependency-groups]
 dev = [ { include-group = "lint" }, { include-group = "test" } ]

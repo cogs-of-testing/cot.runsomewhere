@@ -88,9 +88,10 @@ without two installs.
 
 ### pytest plugin
 
-`cot.runsomewhere.testing` ships a pytest plugin, registered by entry point,
-with one fixture, `rsh_group`: an open group in the test's loop, closed at
-teardown. **Proposed:** failing the test if anything was left open.
+**Proposed:** a pytest plugin, registered by entry point, arrives with the
+analysis helpers that give it something to do, such as failing a test that
+leaves channels, places or tasks open. A fixture that only opens and closes a
+group adds nothing over `async with Group()`, so none ships until then.
 
 ## Level 0
 
