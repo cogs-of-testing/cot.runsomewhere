@@ -56,9 +56,10 @@ launch ─► handshake ─► configure ─► serve ─► close ─► closed
    disposition, enabled services, event loop. Configuration never travels
    in argv, where `ps` and `/proc` would show it.
 4. **Serve.** Channels open and close; services run.
-5. **Close.** Leaving the `spawn` block asks the worker to shut down. The worker stops its running services, closes their channels, and
-   exits. The caller waits for EOF, then terminates the worker
-   and, after a grace period, kills it.
+5. **Close.** Leaving the `spawn` block asks the worker to shut down. The
+   worker stops its running services, drains and closes their channels, and
+   exits. If it has not done so by the deadline, the place forces it
+   ([shutdown](#shutdown)).
 6. **Gone.** On EOF or a transport error at any point, every open channel
    fails with `WorkerGone`, and the gateway is closed. Nothing reconnects;
    a new worker is a new spawn.
@@ -68,23 +69,69 @@ inside the group's. Scopes nest, so a worker spawned through another is closed
 before the one it runs through. If a group's scope is cancelled or fails, it
 closes whatever gateways are still open, in reverse order of creation.
 
-### Managed shutdown (open)
+### Shutdown
 
 The goal: everything that needs exiting exits safely, and nothing is left
-running when its scope ends. How the close escalates is not settled. The
-first implementation has one `close_timeout` per spawn, used for each of up
-to three waits (for EOF, for exit, for exit after terminate) before the kill,
-and shields the graceful close from outside cancellation. Questions to settle:
+running when its scope ends.
 
-- Who owns the grace periods: the place, which knows whether its worker can
-  be terminated or killed at all, or the spawn.
-- Whether outside cancellation may shorten a graceful close, and by how much.
-- The order across relays: workers behind a relay close before the relay's
-  own gateway, but a relay that is itself going away has to close them first.
-- What happens to sync handlers that ignore their closed channel, and to
-  in-process places (thread, subinterpreter), which cannot be killed.
-- How the default engine is stopped when the managing process exits, with
-  nothing left to an `atexit` hook.
+**Stopping a service is not closing its channel.** Stopping asks the handler
+to finish: complete its work, send what it owes, and close its channel with a
+result. Closing ends the communication. A shutdown stops first and closes
+what is left.
+
+Every node that shuts down passes through the same phases:
+
+1. **request**: the node is told to stop: a stop for a service, a
+   gateway-close for a worker, a cancellation for a task;
+2. **drain**: it gets until a deadline to finish by itself, its channels
+   drained ([closing](#closing));
+3. **force**: what the place can do to a node that did not finish: terminate
+   and then kill a process, cancel a task;
+4. **abandon**: what survives force is reported with a `ResourceWarning` and
+   left behind. Only in-process places (thread, subinterpreter) reach this:
+   a thread cannot be killed from outside, which is one reason to put code
+   you do not control in a process.
+
+The place owns the force steps, because only it knows whether its worker can
+be terminated or killed at all. The caller owns the timings, through a
+shutdown policy: how long the drain may take, and how much of it an outside
+cancellation leaves. A cancelled scope never skips force: it may shorten the
+wait, never leave a worker running.
+
+Three kinds of shutdown cascade differently:
+
+- **A channel** that closes stops its handler on the far side. An async
+  handler waiting on the channel sees the close; one busy elsewhere is
+  cancelled. A sync handler sees it on its next channel operation.
+- **A gateway** stops its services, drains and closes their channels, then
+  closes the gateway and has the place force the worker. A group shuts its
+  gateways down in reverse order of creation. The tunnel channels of
+  [relayed](relaying.md) gateways are internals of the gateway, not channels
+  a caller opened: they follow the gateway's shutdown, never a channel's. A
+  relay shutting down closes the gateways tunnelled through it first, each
+  with the time it has left, less a margin, so the leaves finish before the
+  caller forces the relay. The deadline is carried with the gateway-close,
+  and shrinks at every hop. A worker that is sent SIGTERM runs the same
+  shutdown with no time to drain, so terminating a relay does not orphan
+  what runs behind it.
+- **An engine** shuts down every group still open, then stops its event loop
+  and its thread or subinterpreter. It is stopped when the managing
+  process's main thread exits, without an `atexit` hook.
+
+A channel the caller left open when its gateway, group or engine shuts down
+is drained as part of that shutdown, and the facades emit a `ResourceWarning`
+naming it. A channel left by its own block is closed, and drained, as asked:
+nothing to warn about.
+
+Open:
+
+- The shutdown policy's name and shape, and where defaults live: per group,
+  per engine, or per spawn and open. The first implementation's
+  `close_timeout` is renamed with it.
+- How a stop is signalled to a service: per channel, with the gateway-close,
+  or both, and how a sync handler observes it. execnet had no services, so
+  it is no precedent.
+- How the engine host learns that the main thread has exited.
 
 ### Output
 
@@ -143,15 +190,34 @@ different one raises `StateError`. Connecting endpoints across gateways is
 
 ### Closing
 
-Either side may close. A close carries an optional error; the peer's next
-receive after the last item raises `ChannelClosed`, or `RemoteError` when the
-close carried one. Items sent before a close arrive before it. A close is
-final for both directions: a channel is a conversation, and a half-open one
-is a bug waiting to happen. Two directions that end independently are two
-channels.
+Either side may close either direction, and each close tells the peer:
 
-When a service's handler returns, its channel closes with the return value
-as the result, which the caller reads with `await channel.wait_closed()`.
+- `close_send()` ends sending. Items already sent still arrive; the peer's
+  next receive after the last item raises `ChannelClosed`.
+- `close_receive()` ends receiving. Items that arrived and were not taken
+  are discarded; the peer's sends, including one waiting for window, raise
+  `ChannelClosed`.
+- `close()` ends both.
+
+A close carries an optional result or error; the peer sees an error as
+`RemoteError`. When a service's handler returns, its channel closes with the
+return value as the result, which the caller reads with
+`await channel.wait_closed()`.
+
+**Drain.** `await channel.drain()` waits until every item sent has been
+taken by the peer. The window already says so: the receiver grants credit
+back as its consumer takes items ([flow control](#flow-control)), so drain
+needs no frame of its own. A drain also happens as part of `aclose()`, and of
+a [shutdown](#shutdown), bounded by its deadline. The sync `close()` does not
+wait, and does not drain.
+
+Open:
+
+- Which close carries the result: the end of sending, or only the full
+  close. The close is usually what sends it.
+- What a drain does when the peer ends receiving while it waits: raise
+  `ChannelClosed`, or return what was discarded. To be settled by an
+  experiment against a process worker.
 
 ### Flow control
 
