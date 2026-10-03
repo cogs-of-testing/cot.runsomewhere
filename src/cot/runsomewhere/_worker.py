@@ -153,8 +153,8 @@ class WorkerCore:
     async def _info(self, _channel: Channel) -> Any:
         return self._hello.to_value()
 
-    async def _remote_exec(self, channel: Channel, **request: Any) -> Any:
-        return await _remote_exec.serve(channel, **request)
+    async def _remote_exec(self, channel: Channel) -> None:
+        await _remote_exec.serve(channel)
 
     async def _via(self, channel: Channel, *, place: dict[str, Any]) -> None:
         await relay(channel, place_from_value(place))

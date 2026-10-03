@@ -10,7 +10,6 @@ import anyio
 import anyio.abc
 from anyio.lowlevel import cancel_shielded_checkpoint
 
-from . import _remote_exec
 from ._channels import Channel, Connection
 from ._errors import HandshakeRefused, StateError
 from ._frames import FrameType
@@ -142,16 +141,6 @@ class Gateway:
         if isinstance(target, str):
             return _Open(self._opener(target, params), lambda channel: channel)
         return _Open(self._opener(target.service, params), target)
-
-    def remote_exec(self, code: _remote_exec.Code, /, **kwargs: Any) -> _Open[Channel]:
-        """Run code sent from here; the worker must have rsh.remote_exec enabled."""
-
-        async def opener() -> Channel:
-            self._require("rsh.remote_exec")
-            request = _remote_exec.prepare(code, kwargs)
-            return await self._open_channel("rsh.remote_exec", request)
-
-        return _Open(opener, lambda channel: channel)
 
     def spawn(
         self,

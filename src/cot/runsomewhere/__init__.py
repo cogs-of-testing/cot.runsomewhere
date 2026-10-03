@@ -17,6 +17,7 @@ from ._errors import (
 from ._gateway import Client, Gateway, Group, WorkerInfo
 from ._open import open_group
 from ._places import Container, Place, Process, Ssh, Subinterpreter, Thread
+from ._remote_exec import RemoteExec
 from ._values import can_send
 from ._version import version as __version__
 
@@ -32,6 +33,7 @@ __all__ = [
     "Place",
     "Process",
     "RemoteError",
+    "RemoteExec",
     "Ssh",
     "StateError",
     "Subinterpreter",
