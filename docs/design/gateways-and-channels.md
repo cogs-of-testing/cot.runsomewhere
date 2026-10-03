@@ -67,7 +67,8 @@ launch ─► handshake ─► configure ─► serve ─► close ─► closed
 A gateway belongs to exactly one group, and its `spawn` block always ends
 inside the group's. Scopes nest, so a worker spawned through another is closed
 before the one it runs through. If a group's scope is cancelled or fails, it
-closes whatever gateways are still open, in reverse order of creation.
+closes whatever gateways are still open, concurrently where the
+[teardown graph](#shutdown) allows.
 
 ### Shutdown
 
@@ -113,9 +114,34 @@ Every node that shuts down passes through the same phases:
 
 The place owns the force steps, because only it knows whether its worker can
 be terminated or killed at all. The caller owns the timings, through a
-shutdown policy: how long the drain may take, and how much of it an outside
-cancellation leaves. A cancelled scope never skips force: it may shorten the
-wait, never leave a worker running.
+shutdown policy, `rsh.Shutdown`. Each worker has targets of its own, an
+`rsh.Teardown`: `stop`, how long its gateway's stop phase may take, and
+`drain`, how long it gets from the gateway-close to exit. The policy holds
+one for edge workers and one for proxies, and a spawn overrides them with
+`teardown=`. The targets are soft deadlines: each bounds its own node's
+wait, and nothing above caps a subtree. Hard deadlines, a cap on a whole
+subtree, need more detail than that and are left for later. A cancelled
+scope, and an engine stopped because its process exits, skip the waits and
+go straight to force: a cancellation shortens the wait, it never leaves a
+worker running.
+
+**The teardown graph.** Workers that others depend on are proxies: a relay
+with gateways tunnelled through it ([relaying](relaying.md)), and a worker
+carrying `rsh.proxy` connections. The edges of the graph are those tunnel
+channels and proxy connections; no other channel is part of it. An edge
+worker has no dependents. A proxy is torn down only after its dependents,
+and everything the graph does not order is torn down concurrently: sibling
+dependents, separate subtrees, the groups of an engine, the channels of a
+stop phase.
+
+The caller drives the graph: it spawned every worker in it and holds every
+target. Tearing down a proxy whose dependents are still open tears those
+down first, through their own spawns, from the leaves up. When the caller
+cannot drive, because a relay was sent SIGTERM or the link to it was lost,
+the relay falls back on what it knows: it ends each tunnel, gives the leaf
+the targets the caller sent when it opened the tunnel, and then has the place
+force it. A worker that is sent SIGTERM shuts down with no time of its own
+to drain, so a terminated relay does not orphan what runs behind it.
 
 Three kinds of shutdown cascade differently:
 
@@ -123,16 +149,10 @@ Three kinds of shutdown cascade differently:
   handler waiting on the channel sees the close; one busy elsewhere is
   cancelled. A sync handler sees it on its next channel operation.
 - **A gateway** sends its gateway stop, stops every open channel, drains and
-  closes them, then sends the gateway-close and has the place force the worker. A group shuts its
-  gateways down in reverse order of creation. The tunnel channels of
-  [relayed](relaying.md) gateways are internals of the gateway, not channels
-  a caller opened: they follow the gateway's shutdown, never a channel's. A
-  relay shutting down closes the gateways tunnelled through it first, each
-  with the time it has left, less a margin, so the leaves finish before the
-  caller forces the relay. The deadline is carried with the gateway-close,
-  and shrinks at every hop. A worker that is sent SIGTERM runs the same
-  shutdown with no time to drain, so terminating a relay does not orphan
-  what runs behind it.
+  closes them, then sends the gateway-close and has the place force the
+  worker if it overruns. The tunnel channels of [relayed](relaying.md)
+  gateways are internals of the gateway, not channels a caller opened: they
+  follow the graph, never a channel's shutdown.
 - **An engine** shuts down every group still open, then stops its event loop
   and its thread or subinterpreter. It is stopped when the managing
   process's main thread exits, without an `atexit` hook: its host thread is
@@ -147,9 +167,6 @@ nothing to warn about.
 
 Open:
 
-- The shutdown policy's name and shape, and where defaults live: per group,
-  per engine, or per spawn and open. The first implementation's
-  `close_timeout` is renamed with it.
 - How a gateway stop races a channel created and sent just before it.
   HTTP/2's GOAWAY settles the same race by naming the last stream it will
   serve; channel ids are allocated per side, so the gateway stop could name

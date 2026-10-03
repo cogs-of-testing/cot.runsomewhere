@@ -64,8 +64,9 @@ async with group.spawn(rsh.Ssh("outer")) as outer:
 `leaf` is a worker two hops away. Each hop adds latency, and the caller's gateway
 to the leaf still behaves like any other.
 
-Groups own tunnelled gateways like any other, in reverse order of creation, so
-the workers on the build box close before the gateway to the build box does.
+Groups own tunnelled gateways like any other. A relay is a proxy in the
+[teardown graph](gateways-and-channels.md#shutdown): the workers on the build
+box close, concurrently, before the gateway to the build box does.
 
 ### via or ssh ProxyJump
 

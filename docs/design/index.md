@@ -80,7 +80,7 @@ and offers the service's API. Callers use clients; channels are the level
 below.
 
 **Group**: the scope gateways are spawned in. Every `spawn` and `open` is
-an async context manager, so each resource closes with its own block; the group closes whatever is left, in reverse order of creation,
+an async context manager, so each resource closes with its own block; the group closes whatever is left, concurrently where the teardown graph allows,
 on success, error or cancellation alike.
 
 ```python
@@ -327,9 +327,8 @@ Proposed, not yet settled:
    transport extension point until an outside transport asks for one.
 5. No greenlet feature until someone asks; a gevent worker profile first if
    they do.
-6. Shutdown: the policy's name, shape and defaults; how a gateway stop races
-   a channel created just before it; and, by experiment, what a drain does
-   when the peer stops receiving
-   ([gateways](gateways-and-channels.md#shutdown)).
+6. Shutdown: hard deadlines for a whole subtree; how a gateway stop races a
+   channel created just before it; and, by experiment, what a drain does when
+   the peer stops receiving ([gateways](gateways-and-channels.md#shutdown)).
 
 Each part document marks its own proposals.
