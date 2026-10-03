@@ -6,7 +6,7 @@ import socket
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from importlib import import_module
+from importlib.metadata import entry_points
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -45,15 +45,16 @@ class Place:
         raise StateError(msg)
 
 
-_PLACES: dict[str, str] = {
-    "process": "cot.runsomewhere._places:Process",
-    "inloop": "cot.runsomewhere.testing._inloop:InLoop",
-}
+PLACE_GROUP = "cot.runsomewhere.places"
 
 
 def place_from_value(value: dict[str, Any]) -> Place:
-    module, _, name = _PLACES[value["kind"]].partition(":")
-    kind: type[Place] = getattr(import_module(module), name)
+    """A place sent by a caller, its kind resolved by entry-point name."""
+    found = entry_points(group=PLACE_GROUP, name=value["kind"])
+    if not found:
+        msg = f"no place kind {value['kind']!r} is installed on this worker"
+        raise LookupError(msg)
+    kind: type[Place] = next(iter(found)).load()
     fields = {key: item for key, item in value.items() if key != "kind"}
     return kind(**fields)
 

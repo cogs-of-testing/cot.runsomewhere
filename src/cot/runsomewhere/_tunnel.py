@@ -29,8 +29,13 @@ class ChannelByteStream(anyio.abc.ByteStream):
     async def receive(self, max_bytes: int = 65536) -> bytes:  # noqa: ARG002 - one item is one chunk
         try:
             data: bytes = await self.channel.receive()
-        except (ChannelClosed, RemoteError):
+        except ChannelClosed:
             raise anyio.EndOfStream from None
+        except RemoteError as error:
+            # the relay failed, e.g. to launch the place: its reason is the
+            # only account of why this stream ended
+            msg = f"the relay failed: {error}"
+            raise anyio.BrokenResourceError(msg) from error
         return data
 
     async def send_eof(self) -> None:

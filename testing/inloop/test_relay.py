@@ -63,3 +63,16 @@ async def test_a_worker_without_via_cannot_relay():
         with pytest.raises(rsh.StateError, match=re.escape("rsh.via")):
             async with gateway.spawn(rsht.InLoop()):
                 pass
+
+
+class Nowhere(rsh.Place):
+    kind = "nowhere"
+
+    def to_value(self):
+        return {"kind": self.kind}
+
+
+async def test_a_relay_resolves_place_kinds_by_entry_point_name(gateway):
+    with pytest.raises(rsh.WorkerGone, match=re.escape("'nowhere'")):
+        async with gateway.spawn(Nowhere()):
+            pytest.fail("a place kind nobody declared must not yield a gateway")

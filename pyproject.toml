@@ -34,6 +34,12 @@ dependencies = [
 urls.Documentation = "https://github.com/cogs-of-testing/cot.runsomewhere/tree/main/docs"
 urls.Source = "https://github.com/cogs-of-testing/cot.runsomewhere"
 scripts.runsomewhere = "cot.runsomewhere._cli:main"
+entry-points."cot.runsomewhere.places".container = "cot.runsomewhere._places:Container"
+entry-points."cot.runsomewhere.places".inloop = "cot.runsomewhere.testing._inloop:InLoop"
+entry-points."cot.runsomewhere.places".process = "cot.runsomewhere._places:Process"
+entry-points."cot.runsomewhere.places".ssh = "cot.runsomewhere._places:Ssh"
+entry-points."cot.runsomewhere.places".subinterpreter = "cot.runsomewhere._places:Subinterpreter"
+entry-points."cot.runsomewhere.places".thread = "cot.runsomewhere._places:Thread"
 
 [dependency-groups]
 dev = [ { include-group = "lint" }, { include-group = "test" } ]
