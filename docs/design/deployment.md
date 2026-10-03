@@ -47,8 +47,11 @@ from cot.runsomewhere.compat import xspec
 xspec.parse("ssh=buildbox//python=3.13")  # rsh.Ssh("buildbox", python="3.13")
 ```
 
-It is a compat module, outside the default API: `rsh` itself has no string
-form of a place.
+It reads only keys with an exact equivalent: `popen`, `ssh=<host>`,
+`python=` and, for `popen`, `env:<NAME>=<value>`. Any other key, such as
+`id`, `chdir` or `via`, and ssh options inside the host, is refused by name
+rather than approximated. It is a compat module, outside the default API:
+`rsh` itself has no string form of a place.
 
 ## Referring to an interpreter
 
