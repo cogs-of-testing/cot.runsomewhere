@@ -1,5 +1,6 @@
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -122,9 +123,15 @@ def _gone(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
-    stat = Path(f"/proc/{pid}/stat")
-    # an exited child not yet reaped by whoever inherited it
-    return stat.exists() and stat.read_text().split()[2] == "Z"
+    # an exited child not yet reaped: trio, unlike asyncio, reaps only on
+    # wait, and macOS has no /proc to tell
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return state.startswith("Z") or not state
 
 
 async def test_terminating_a_relay_forces_a_wedged_worker_behind_it():
