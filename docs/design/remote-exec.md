@@ -26,8 +26,9 @@ code on the worker; leaving the block closes it. Each run gets its own
 channel, created by the service and handed to the client over the client's
 channel. The examples below use `rx` for that client.
 
-runsomewhere is not execnet: there is no `gateway.remote_exec` and no
-compatibility layer for execnet's API.
+runsomewhere is not execnet: there is no `gateway.remote_exec`, and the
+only execnet compatibility is reading spec strings, in a compat module
+([deployment](deployment.md#referring-to-a-place)).
 
 ## What can be sent
 

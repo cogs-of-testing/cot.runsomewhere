@@ -37,8 +37,18 @@ rsh.Container(name="app-1", runtime="docker")
   and its fields, never as an import path. runsomewhere declares its own
   places; the test harness declares `inloop` the same way.
 
-`rsh.parse_place("ssh=buildbox//python=3.13")` reads the same values from a
-string, for command lines and configuration files.
+Places are values, not strings. For command lines and configuration files
+written for execnet, `cot.runsomewhere.compat.xspec` reads execnet's spec
+strings into the same values:
+
+```python
+from cot.runsomewhere.compat import xspec
+
+xspec.parse("ssh=buildbox//python=3.13")  # rsh.Ssh("buildbox", python="3.13")
+```
+
+It is a compat module, outside the default API: `rsh` itself has no string
+form of a place.
 
 ## Referring to an interpreter
 
