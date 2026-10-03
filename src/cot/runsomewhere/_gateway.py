@@ -6,6 +6,7 @@ import contextlib
 import sys
 import warnings
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
 
 import anyio
@@ -169,6 +170,7 @@ class Gateway:
             # caller cannot drive the teardown
             params = {"place": place.to_value(), "teardown": leaf.to_value()}
             channel = await self._open_channel("rsh.via", params)
+            channel.tunnel = True
 
             async def exited() -> None:
                 # the relay closes the tunnel once its leaf has exited
@@ -181,7 +183,9 @@ class Gateway:
             return Launched(ChannelByteStream(channel), exited, force)
 
         self._spawn_scope.proxy = True
-        return _Spawn(self._group, place, launch, services, teardown)
+        return _Spawn(
+            self._group, place, launch, services, teardown, proxy=self._spawn_scope
+        )
 
     def _opener(
         self, service: str, params: dict[str, Any]
@@ -237,7 +241,8 @@ async def _stop_left_open(connection: Connection, until: float) -> None:
     side, and every channel still open is stopped and drained."""
     connection.stopping = True
     connection.send_frame(FrameType.GATEWAY_STOP, 0)
-    left_open = connection.channels()
+    # tunnels are edges of the teardown graph, torn down with their leaves
+    left_open = [channel for channel in connection.channels() if not channel.tunnel]
     for channel in left_open:
         channel.stop(deadline=max(0.0, until - anyio.current_time()))
     outcomes = dict.fromkeys(left_open, "")
@@ -276,6 +281,8 @@ class _Spawn:
         launch: Callable[[anyio.abc.TaskGroup], Awaitable[Launched]],
         services: Mapping[str, bool] | None,
         teardown: Teardown | None,
+        *,
+        proxy: _Spawn | None = None,
     ) -> None:
         self._group = group
         self._place = place
@@ -284,6 +291,12 @@ class _Spawn:
         self._teardown = teardown
         #: whether workers were spawned through this one
         self.proxy = False
+        #: the spawn of the worker this one is tunnelled through
+        self._through = proxy
+        #: open spawns tunnelled through this one: torn down before it
+        self._dependents: set[_Spawn] = set()
+        self._closing = False
+        self._closed = anyio.Event()
         self._connection_scope = anyio.CancelScope(shield=True)
         self._connection_done = anyio.Event()
         self._launched: Launched | None = None
@@ -322,6 +335,8 @@ class _Spawn:
             self._group,
             self,
         )
+        if self._through is not None:
+            self._through._dependents.add(self)
         return self._gateway
 
     async def __aexit__(self, *exc_info: object) -> None:
@@ -337,6 +352,34 @@ class _Spawn:
             self._connection_done.set()
 
     async def _close(self, *, graceful: bool) -> None:
+        """Tear down this worker's dependents, concurrently, then the worker.
+
+        A dependent is closed once: its own block, leaving later, finds it
+        done.
+        """
+        if self._closing:
+            with anyio.CancelScope(shield=True):
+                await self._closed.wait()
+            return
+        self._closing = True
+        try:
+            try:
+                await self._close_dependents()
+            finally:
+                await self._close_worker(graceful=graceful)
+        finally:
+            self._closed.set()
+            if self._through is not None:
+                self._through._dependents.discard(self)
+
+    async def _close_dependents(self) -> None:
+        if not self._dependents:
+            return
+        async with anyio.create_task_group() as dependents:
+            for dependent in list(self._dependents):
+                dependents.start_soon(partial(dependent._close, graceful=True))
+
+    async def _close_worker(self, *, graceful: bool) -> None:
         """Stop what is still open, ask the worker to exit, wait for it until
         the deadline, then have the place force it. A cancelled scope goes
         straight to force."""

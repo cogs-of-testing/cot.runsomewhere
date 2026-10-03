@@ -28,6 +28,8 @@ class Channel:
     """An ordered, two-way stream of values with the peer."""
 
     _rsh_channel = True
+    #: carries a tunnelled gateway: an edge of the teardown graph
+    tunnel = False
 
     def __init__(self, connection: Connection, channel_id: int) -> None:
         self._connection = connection

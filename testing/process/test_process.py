@@ -182,3 +182,26 @@ def test_a_groups_policy_reaches_its_workers_through_the_sync_facade():
     # the default targets would take five seconds before force
     assert time.monotonic() - start < policy.edge.total + 2.5
     assert _gone(pid)
+
+
+async def test_closing_a_relay_first_tears_down_the_worker_behind_it_first():
+    # the relay's block is left before its leaf's, as an engine host or an
+    # exit stack can do; the leaf still goes first, and nothing is reported
+    # as left open
+    async with rsh.open_group() as group:
+        relay_scope = group.spawn(rsh.Process())
+        relay = await relay_scope.__aenter__()
+        targets = rsh.Teardown(stop=0.2, drain=0.3)
+        leaf_scope = relay.spawn(rsh.Process(), teardown=targets)
+        leaf = await leaf_scope.__aenter__()
+        async with leaf.open("rsh_test_services.echo") as channel:
+            await channel.send("up")
+            assert await channel.receive() == "up"
+        with anyio.fail_after(10):
+            await relay_scope.__aexit__(None, None, None)
+        assert _gone(relay.worker.pid)
+        assert _gone(leaf.worker.pid)
+        with pytest.raises(rsh.StateError):
+            async with leaf.open("rsh_test_services.echo"):
+                pass
+        await leaf_scope.__aexit__(None, None, None)
