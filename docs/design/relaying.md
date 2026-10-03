@@ -9,9 +9,9 @@ Status: design. Decisions marked **proposed** are open for review.
 Two services let a worker reach further on the caller's behalf. Both carry a
 byte stream over one channel, and neither looks inside it.
 
-| Service | Reaches | The caller gets |
-|---|---|---|
-| `rsh.via` | a new worker, started from this one | a gateway to that worker |
+| Service     | Reaches                               | The caller gets                |
+| ----------- | ------------------------------------- | ------------------------------ |
+| `rsh.via`   | a new worker, started from this one   | a gateway to that worker       |
 | `rsh.proxy` | an address reachable from this worker | a byte stream, or a local port |
 
 ## via: workers spawned through a worker
@@ -81,7 +81,9 @@ that can reach a container runtime.
 worker's side and carries the bytes to the caller.
 
 ```python
-async with group.spawn(rsh.Container(name="app-1"), services={"rsh.proxy": True}) as gateway:
+async with group.spawn(
+    rsh.Container(name="app-1"), services={"rsh.proxy": True}
+) as gateway:
     # a byte stream to a database only reachable inside the container's network
     async with gateway.connect("tcp:db:5432") as stream:
         await stream.send(startup_packet)

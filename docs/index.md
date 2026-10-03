@@ -11,5 +11,7 @@ where needed: threads, subinterpreters, processes, remote hosts, containers.
 from cot import runsomewhere as rsh
 ```
 
-Nothing is implemented yet. The [design](design/index.md) describes the model,
-the use cases it is built for, and what it guarantees.
+Early, and not released: the protocol, services, remote exec, relaying, local
+processes and the engines behind the facades work; the other places,
+bootstrapping and deployment do not yet. The [design](design/index.md)
+describes the model, the use cases it is built for, and what it guarantees.

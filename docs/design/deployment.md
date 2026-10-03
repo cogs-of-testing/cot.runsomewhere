@@ -32,19 +32,36 @@ rsh.Container(name="app-1", runtime="docker")
 - **Places relative to a worker** are the same values handed to
   `gateway.spawn` ([relaying](relaying.md)); `rsh.Process()` spawned through
   the build box's gateway is a process on the build box.
+- **Place kinds are entry points**, in the group `cot.runsomewhere.places`,
+  like services. A place sent to `rsh.via` travels as its entry-point name
+  and its fields, never as an import path. runsomewhere declares its own
+  places; the test harness declares `inloop` the same way.
 
-`rsh.parse_place("ssh=buildbox//python=3.13")` reads the same values from a
-string, for command lines and configuration files.
+Places are values, not strings. For command lines and configuration files
+written for execnet, `cot.runsomewhere.compat.xspec` reads execnet's spec
+strings into the same values:
+
+```python
+from cot.runsomewhere.compat import xspec
+
+xspec.parse("ssh=buildbox//python=3.13")  # rsh.Ssh("buildbox", python="3.13")
+```
+
+It reads only keys with an exact equivalent: `popen`, `ssh=<host>`,
+`python=` and, for `popen`, `env:<NAME>=<value>`. Any other key, such as
+`id`, `chdir` or `via`, and ssh options inside the host, is refused by name
+rather than approximated. It is a compat module, outside the default API:
+`rsh` itself has no string form of a place.
 
 ## Referring to an interpreter
 
 `python=` is interpreted on the target, not on the caller:
 
-| Value | Means |
-|---|---|
-| omitted | for `Process`: the caller's own interpreter and environment. Elsewhere: whatever uv picks by default there |
+| Value                              | Means                                                                                                                |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| omitted                            | for `Process`: the caller's own interpreter and environment. Elsewhere: whatever uv picks by default there           |
 | `"3.12"`, `">=3.11"`, `"pypy3.10"` | a version request, resolved by uv on the target: an installed interpreter if one matches, a uv-managed one otherwise |
-| `"/usr/bin/python3"` | exactly that interpreter |
+| `"/usr/bin/python3"`               | exactly that interpreter                                                                                             |
 
 Omitted `python=` on a local `Process` is the one case that needs no uv at
 all: the worker is `sys.executable -m cot.runsomewhere worker` in the
@@ -151,8 +168,10 @@ for a given time.
 The caller knows local paths; the deployed tree lives elsewhere.
 
 ```python
-env.paths.translate("testing/test_x.py")   # "/home/ci/.local/share/.../testing/test_x.py"
-env.paths.root                             # the remote workspace
+env.paths.translate(
+    "testing/test_x.py"
+)  # "/home/ci/.local/share/.../testing/test_x.py"
+env.paths.root  # the remote workspace
 ```
 
 A caller hands services remote paths, never local ones.

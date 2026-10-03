@@ -43,9 +43,9 @@ main interpreter                        engine host
 
 Two hosts:
 
-| Host | Runs the core in | Messages cross as | Available |
-|---|---|---|---|
-| thread | an event loop on a dedicated OS thread | objects, through thread-safe queues | always |
+| Host           | Runs the core in                                        | Messages cross as                             | Available                                |
+| -------------- | ------------------------------------------------------- | --------------------------------------------- | ---------------------------------------- |
+| thread         | an event loop on a dedicated OS thread                  | objects, through thread-safe queues           | always                                   |
 | subinterpreter | an event loop in its own interpreter, on its own thread | frames as `bytes`, through interpreter queues | Python 3.14+ (`concurrent.interpreters`) |
 
 In a subinterpreter host, the engine does the IO, framing, flow control and
@@ -60,19 +60,40 @@ interpreter is busy with CPU-bound work or a long C call, so one slow caller
 cannot stall a worker's tunnel, or every worker behind a relay. A thread host
 gives the same structure without that isolation.
 
-**To verify:** anyio with trio and with asyncio runs in a
-`concurrent.interpreters` subinterpreter, including sockets and subprocess
-spawning from there.
+Verified on Python 3.14: anyio's asyncio backend runs in a
+`concurrent.interpreters` subinterpreter, with threads and sockets, and the
+host runs in-loop workers with entry-point services there. **To verify:** trio
+in a subinterpreter, and spawning worker processes from one.
 
-**Proposed:** the thread host is the default; the subinterpreter host is
-opt-in until it has been measured, and chosen per process:
+## Choosing an engine
+
+Nobody has to create an engine. The **default engine** is a thread host,
+started lazily by the first facade call that needs one, and shared by every
+group opened without an override. The common case is one engine per managing
+process, handling every worker that process spawns.
+
+The default holds no gateways of its own: every group still closes with its
+block, so between groups the engine is idle. Stopping the engine itself when
+the managing process exits is part of
+[managed shutdown](gateways-and-channels.md#managed-shutdown-open).
+
+An override is a context variable, set with `rsh.use_engine`:
 
 ```python
-rsh.sync.use_engine(rsh.SubinterpreterEngine())
+with rsh.use_engine(rsh.SubinterpreterEngine()):
+    with rsh.sync.open_group() as group:
+        ...
 ```
 
-There is one engine host per process, shared by every facade in it, and
-started on first use.
+Groups opened in the block, and in tasks started from it, use that engine.
+Like any context variable, it does not follow a plain `threading.Thread`: a
+thread started inside the block sees the default unless it is started in a
+copy of the block's context. An engine set this way is also started lazily.
+
+The subinterpreter host is **opt-in** until it has been measured. It runs the
+engine's loop on a thread inside a subinterpreter, which has its own GIL, so
+the engine's IO and thread management do not compete with the managing code
+even on a Python without free-threading.
 
 ## The sync facade
 
@@ -104,12 +125,14 @@ is the only place greenlet support would touch.
 
 ## The async facade
 
-An async caller that does not want the protocol in its own loop uses the same
-core API through the engine host:
+An async `rsh.open_group()` runs the core in the caller's own loop and
+uses no engine. An async caller that does not want the protocol in its own
+loop sets an engine, and the same API then runs through it:
 
 ```python
-async with rsh.open_group(engine=rsh.SubinterpreterEngine()) as group:
-    ...
+with rsh.use_engine(rsh.SubinterpreterEngine()):
+    async with rsh.open_group() as group:
+        ...
 ```
 
 The API is identical; calls cross to the host and back, and the caller's

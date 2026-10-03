@@ -1,0 +1,22 @@
+[build-system]
+build-backend = "hatchling.build"
+requires = [ "hatchling" ]
+
+[project]
+name = "rsh-test-services"
+version = "0"
+description = "Services runsomewhere's own test suite spawns at every isolation level"
+requires-python = ">=3.10"
+# cot.runsomewhere is not declared: it is the workspace root under test, not
+# yet a distribution, and must not be resolved from an index
+dependencies = []
+
+[project.entry-points."cot.runsomewhere.services"]
+"rsh_test_services.echo" = "rsh_test_services:echo"
+"rsh_test_services.total" = "rsh_test_services:total"
+"rsh_test_services.fail" = "rsh_test_services:fail"
+"rsh_test_services.produce" = "rsh_test_services:produce"
+"rsh_test_services.env" = "rsh_test_services:env"
+"rsh_test_services.noisy_echo" = "rsh_test_services:noisy_echo"
+"rsh_test_services.crash" = "rsh_test_services:crash"
+"rsh_test_services.stubborn" = "rsh_test_services:stubborn"

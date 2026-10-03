@@ -4,8 +4,8 @@
 whether runsomewhere fits their system; Ronny prompted it, it did the work,
 Ronny read it.*
 
-Status: design. Nothing is implemented yet. The API below is a sketch; names
-may still move, the model will not.
+Status: design, partly implemented; the build order below says how far. The
+API below is a sketch; names may still move, the model will not.
 
 ```python
 from cot import runsomewhere as rsh
@@ -47,11 +47,11 @@ sent by the caller runs only on a worker where the caller enabled
 
 ```python
 rsh.Thread()
-rsh.Subinterpreter()                             # Python 3.14+
+rsh.Subinterpreter()  # Python 3.14+
 rsh.Process(python="3.10")
 rsh.Ssh("box", python="3.13")
-rsh.Container("fedora:44", runtime="podman")     # fresh container
-rsh.Container(name="db-1", runtime="podman")     # exec into a running one
+rsh.Container("fedora:44", runtime="podman")  # fresh container
+rsh.Container(name="db-1", runtime="podman")  # exec into a running one
 ```
 
 **Environment**: what is installed where the worker runs. Preferably an
@@ -79,9 +79,8 @@ channels, so a service can hand out further conversations.
 and offers the service's API. Callers use clients; channels are the level
 below.
 
-**Group**: the scope gateways are spawned in. Every `spawn`, `open` and
-`remote_exec` is an async context manager, so each resource closes with its
-own block; the group closes whatever is left, in reverse order of creation,
+**Group**: the scope gateways are spawned in. Every `spawn` and `open` is
+an async context manager, so each resource closes with its own block; the group closes whatever is left, in reverse order of creation,
 on success, error or cancellation alike.
 
 ```python
@@ -193,8 +192,9 @@ API without `await`, plus `timeout=` ([surfaces](surfaces.md)).
 
 ### Poking at a host
 
-Not everything is worth a package. For a one-off question, remote exec sends
-a function, as text, to a worker that has it enabled:
+Not everything is worth a package. For a one-off question, remote exec, a
+concession for ad-hoc work, sends a function, as text, to a worker that has it
+enabled:
 
 ```python
 def listing(channel, path):
@@ -204,9 +204,12 @@ def listing(channel, path):
 
 
 async with rsh.open_group() as group:
-    async with group.spawn(rsh.Ssh("nas"), services={"rsh.remote_exec": True}) as gateway:
-        async with gateway.remote_exec(listing, path="/var/lib/app") as channel:
-            print(await channel.wait_closed())
+    async with group.spawn(
+        rsh.Ssh("nas"), services={"rsh.remote_exec": True}
+    ) as gateway:
+        async with gateway.open(rsh.RemoteExec) as rx:
+            async with rx.run(listing, path="/var/lib/app") as channel:
+                print(await channel.wait_closed())
 ```
 
 ### Diagnostics inside a running container
@@ -250,8 +253,10 @@ plugins may also crash. The isolation is for state, not hostile code.
 - **Values:** `None`, `bool`, `int`, `float`, `complex`, `str`, `bytes`,
   `tuple`, `list`, `dict`, `set`, `frozenset`, and channels.
   `rsh.can_send(x)` checks without sending.
-- **Nothing outlives its group.** No global state, no default group, no atexit
-  hooks.
+- **Nothing outlives its group.** There is no default group. The one
+  process-wide object is the facades' default engine, started lazily and
+  idle between groups; an override is a context variable
+  ([surfaces](surfaces.md)).
 - **Async core, sync facade.** The core API is async and runs in your own trio
   or asyncio loop, with cancellation from your own scope and no `timeout=`.
   Sync code uses a facade over the same core, run in a thread or
@@ -261,8 +266,8 @@ plugins may also crash. The isolation is for state, not hostile code.
 - **Bounded memory.** Each channel has a receiver-granted window; a sender
   waits when it is full.
 - **Three kinds of error:** the other side failed (`RemoteError`, with the
-  remote traceback); the connection is gone (`ChannelClosed`, `WorkerGone`,
-  `HostNotFound`, all `OSError`); you used the API wrong (`StateError`).
+  remote traceback); the connection is gone or was refused (`ChannelClosed`,
+  `WorkerGone`, `HostNotFound`, `HandshakeRefused`, all `OSError`); you used the API wrong (`StateError`).
   Sync-facade timeouts raise the builtin `TimeoutError`.
 - **Skew fails first.** Mismatched runsomewhere versions refuse at handshake,
   before any service runs.
@@ -288,16 +293,16 @@ plugins may also crash. The isolation is for state, not hostile code.
 
 ## The parts
 
-| Document | Covers |
-|---|---|
-| [API surfaces and engine hosts](surfaces.md) | the async core, thread and subinterpreter engine hosts, the sync and async facades |
-| [Gateways and channels](gateways-and-channels.md) | worker and gateway, the gateway's lifecycle and output, channels, flow control, the wire, errors |
-| [Services](services.md) | declaring services, channels and clients, built-in services, where handlers run, stopping |
-| [Remote exec](remote-exec.md) | running strings, modules and functions sent by the caller; off by default |
-| [Relaying](relaying.md) | `via`: workers spawned through workers; `proxy`: connections from a worker's vantage point |
-| [Places, interpreters and deployment](deployment.md) | referring to hosts, containers and interpreters; environments; deploying a project |
-| [Bootstrapping](bootstrap.md) | using an existing install; the ladder from stdin and sockets to importable wheels when there is none |
-
+| Document                                             | Covers                                                                                               |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| [API surfaces and engine hosts](surfaces.md)         | the async core, thread and subinterpreter engine hosts, the sync and async facades                   |
+| [Gateways and channels](gateways-and-channels.md)    | worker and gateway, the gateway's lifecycle and output, channels, flow control, the wire, errors     |
+| [Services](services.md)                              | declaring services, channels and clients, built-in services, where handlers run, stopping            |
+| [Remote exec](remote-exec.md)                        | running strings, modules and functions sent by the caller; off by default                            |
+| [Relaying](relaying.md)                              | `via`: workers spawned through workers; `proxy`: connections from a worker's vantage point           |
+| [Places, interpreters and deployment](deployment.md) | referring to hosts, containers and interpreters; environments; deploying a project                   |
+| [Bootstrapping](bootstrap.md)                        | using an existing install; the ladder from stdin and sockets to importable wheels when there is none |
+| [Testing](testing.md)                                | isolation levels, the in-loop harness `cot.runsomewhere.testing`, fault injection                    |
 
 ## Status and open decisions
 
@@ -306,17 +311,24 @@ Build order, each step its own pull request: skeleton; core protocol with the
 sync facade; `Thread` and `Subinterpreter`; uv provisioning, `Ssh` and
 `Deployment`; podman then docker; later kubernetes and a gevent profile.
 
+The first four steps landed together, in one pull request: the skeleton, the
+core protocol with `Process`, services, clients and remote exec, and the
+engine hosts with the sync facade. `Thread` and `Subinterpreter` places are
+next.
+
 Proposed, not yet settled:
 
 1. Clients written once, async; `gateway.open(Client)` on the sync facade
    yields a sync wrapper ([services](services.md)).
 2. Copy semantics on threads too, with no `Thread(shared=True)`.
-3. The core written on anyio, so it runs in trio and asyncio callers alike;
-   the thread engine host by default, the subinterpreter one opt-in until
-   measured ([surfaces](surfaces.md)).
+3. The core written on anyio, so it runs in trio and asyncio callers alike
+   ([surfaces](surfaces.md)).
 4. Kubernetes (`kubectl exec -i`) in-tree after ssh and podman, with no public
    transport extension point until an outside transport asks for one.
 5. No greenlet feature until someone asks; a gevent worker profile first if
    they do.
+6. Managed shutdown: how closing escalates, who owns the grace periods, and
+   how the default engine stops
+   ([gateways](gateways-and-channels.md#managed-shutdown-open)).
 
 Each part document marks its own proposals.

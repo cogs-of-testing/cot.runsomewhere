@@ -20,10 +20,10 @@ it, close it.
 ```python
 async with rsh.open_group() as group:
     async with group.spawn(rsh.Process(python="3.12")) as gateway:
-        gateway.worker.python      # "3.12.9"
-        gateway.worker.pid         # 41327
-        gateway.worker.platform    # "linux-x86_64"
-        gateway.services           # frozenset({"rsh.info", "rsh.via", ...})
+        gateway.worker.python  # "3.12.9"
+        gateway.worker.pid  # 41327
+        gateway.worker.platform  # "linux-x86_64"
+        gateway.services  # frozenset({"rsh.info", "rsh.via", ...})
 ```
 
 `group.spawn` is an async context manager (a plain one on the sync facade):
@@ -68,6 +68,24 @@ inside the group's. Scopes nest, so a worker spawned through another is closed
 before the one it runs through. If a group's scope is cancelled or fails, it
 closes whatever gateways are still open, in reverse order of creation.
 
+### Managed shutdown (open)
+
+The goal: everything that needs exiting exits safely, and nothing is left
+running when its scope ends. How the close escalates is not settled. The
+first implementation has one `close_timeout` per spawn, used for each of up
+to three waits (for EOF, for exit, for exit after terminate) before the kill,
+and shields the graceful close from outside cancellation. Questions to settle:
+
+- Who owns the grace periods: the place, which knows whether its worker can
+  be terminated or killed at all, or the spawn.
+- Whether outside cancellation may shorten a graceful close, and by how much.
+- The order across relays: workers behind a relay close before the relay's
+  own gateway, but a relay that is itself going away has to close them first.
+- What happens to sync handlers that ignore their closed channel, and to
+  in-process places (thread, subinterpreter), which cannot be killed.
+- How the default engine is stopped when the managing process exits, with
+  nothing left to an `atexit` hook.
+
 ### Output
 
 A worker whose protocol runs on its own stream leaves stdio to the code it
@@ -92,10 +110,10 @@ one gateway. Values are `None`, `bool`, `int`, `float`, `complex`, `str`,
 `bytes`, `tuple`, `list`, `dict`, `set`, `frozenset`, and channels.
 
 ```python
-async with gateway.open("fleet.agent", verbose=True) as ch:   # a service, see services
+async with gateway.open("fleet.agent", verbose=True) as ch:  # a service, see services
     await ch.send({"op": "status"})
     reply = await ch.receive()
-    async for item in ch:                                      # until the other side closes
+    async for item in ch:  # until the other side closes
         ...
 ```
 
@@ -111,7 +129,7 @@ existing channel:
 
 ```python
 async def serve(channel):
-    logs = channel.new()          # created here, usable once the peer receives it
+    logs = channel.new()  # created here, usable once the peer receives it
     await channel.send({"logs": logs})
 ```
 
@@ -157,11 +175,11 @@ been written entirely or not at all.
 
 Every frame is a fixed header and a payload:
 
-| Field | Size | Meaning |
-|---|---|---|
-| type | 1 byte | hello, config, open, data, credit, close, gateway-close |
-| channel | 4 bytes | channel id; 0 for gateway-level frames |
-| length | 4 bytes | payload length |
+| Field   | Size    | Meaning                                                 |
+| ------- | ------- | ------------------------------------------------------- |
+| type    | 1 byte  | hello, config, open, data, credit, close, gateway-close |
+| channel | 4 bytes | channel id; 0 for gateway-level frames                  |
+| length  | 4 bytes | payload length                                          |
 
 The decoder is sans-IO: it takes bytes and yields frames, never reads or
 waits, so every transport and every event loop uses the same one.
@@ -171,6 +189,10 @@ caller, even on the worker, so both can open without coordination. Payloads
 of data frames are values in a tagged binary encoding; nothing in it can name
 a class or run code on decode.
 
+Names on the wire are entry-point names: services by their service name,
+places (sent to `rsh.via`) by their place name. No frame carries an import
+path.
+
 **Proposed:** the stream starts with 4 magic bytes and a protocol version
 byte, before any frame, so that a worker started on the wrong stream, or an
 unrelated program at the other end, fails on the first read with a clear
@@ -178,11 +200,12 @@ message instead of a garbled frame.
 
 ## Errors
 
-| Situation | Error |
-|---|---|
-| The far side raised, or closed with an error | `RemoteError`, with the remote traceback as text |
-| The channel was closed | `ChannelClosed` (an `OSError`) |
-| The worker or the link is gone | `WorkerGone` (an `OSError`) |
-| A place could not be reached at all | `HostNotFound` (an `OSError`) |
-| Wrong use: closed channel, foreign gateway, unknown service | `StateError` |
-| A sync-facade timeout | builtin `TimeoutError` |
+| Situation                                                         | Error                                                   |
+| ----------------------------------------------------------------- | ------------------------------------------------------- |
+| The far side raised, or closed with an error                      | `RemoteError`, with the remote traceback as text        |
+| The channel was closed                                            | `ChannelClosed` (an `OSError`)                          |
+| The worker or the link is gone                                    | `WorkerGone` (an `OSError`)                             |
+| A place could not be reached at all                               | `HostNotFound` (an `OSError`)                           |
+| The other side's protocol or runsomewhere version is incompatible | `HandshakeRefused` (an `OSError`), naming both versions |
+| Wrong use: closed channel, foreign gateway, unknown service       | `StateError`                                            |
+| A sync-facade timeout                                             | builtin `TimeoutError`                                  |
