@@ -406,3 +406,34 @@ async def test_no_channel_is_created_once_the_gateway_is_stopping():
     with pytest.warns(ResourceWarning, match="still open"):
         await leave_it_open()
     assert refused == [True]
+
+
+async def test_the_stop_phase_finishes_channels_left_open_concurrently():
+    # the deaf channel never closes; waiting on it first would leave the
+    # picky one's discarded item unreported
+    async def two(channel):
+        deaf, picky = channel.new(), channel.new()
+        await channel.send(deaf)
+        await channel.send(picky)
+        with contextlib.suppress(rsh.ChannelClosed):
+            await channel.receive()
+        await picky.stop_requested()
+        picky.close_receive()
+        await anyio.sleep_forever()
+
+    async def leave_them_open():
+        async with rsh.open_group() as group:
+            place = rsht.InLoop(services={"t.two": two})
+            targets = rsh.Teardown(stop=0.3, drain=0.3)
+            async with (
+                group.spawn(place, teardown=targets) as gateway,
+                gateway.open("t.two") as channel,
+            ):
+                await channel.receive()
+                picky = await channel.receive()
+                await picky.send("unread")
+
+    with pytest.warns(ResourceWarning) as warned:
+        await leave_them_open()
+    messages = [str(warning.message) for warning in warned]
+    assert any("discarded 1" in message for message in messages), messages

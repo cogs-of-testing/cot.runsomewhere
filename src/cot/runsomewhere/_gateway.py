@@ -246,16 +246,21 @@ async def _stop_left_open(connection: Connection, until: float) -> None:
     for channel in left_open:
         channel.stop(deadline=max(0.0, until - anyio.current_time()))
     outcomes = dict.fromkeys(left_open, "")
+
+    async def finish(channel: Channel) -> None:
+        try:
+            await channel.drain()
+        except OSError as error:
+            # a drain during a shutdown records what went wrong, and the
+            # shutdown goes on
+            outcomes[channel] = f": {error}"
+        with contextlib.suppress(OSError, RemoteError):
+            await channel.wait_closed()
+
     with anyio.move_on_at(until):
-        for channel in left_open:
-            try:
-                await channel.drain()
-            except OSError as error:
-                # a drain during a shutdown records what went wrong, and the
-                # shutdown goes on
-                outcomes[channel] = f": {error}"
-            with contextlib.suppress(OSError, RemoteError):
-                await channel.wait_closed()
+        async with anyio.create_task_group() as finishing:
+            for channel in left_open:
+                finishing.start_soon(finish, channel)
     for channel, outcome in outcomes.items():
         warnings.warn(
             f"{channel!r} was still open when its gateway shut down{outcome}",
