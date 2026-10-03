@@ -19,6 +19,7 @@ from ._gateway import Client, Gateway, Group, WorkerInfo
 from ._open import open_group
 from ._places import Container, Place, Process, Ssh, Subinterpreter, Thread
 from ._remote_exec import RemoteExec
+from ._shutdown import Shutdown, Teardown
 from ._values import can_send
 from ._version import version as __version__
 
@@ -36,10 +37,12 @@ __all__ = [
     "Process",
     "RemoteError",
     "RemoteExec",
+    "Shutdown",
     "Ssh",
     "StateError",
     "Subinterpreter",
     "SubinterpreterEngine",
+    "Teardown",
     "Thread",
     "ThreadEngine",
     "WorkerGone",

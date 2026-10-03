@@ -363,7 +363,9 @@ async def test_a_channel_left_open_is_stopped_and_reported_when_its_gateway_shut
         async with rsh.open_group() as group:
             place = rsht.InLoop(services={"t.split": split})
             async with (
-                group.spawn(place, close_timeout=0.4) as gateway,
+                group.spawn(
+                    place, teardown=rsh.Teardown(stop=0.2, drain=0.2)
+                ) as gateway,
                 gateway.open("t.split") as channel,
             ):
                 return await channel.receive()
@@ -394,7 +396,9 @@ async def test_no_channel_is_created_once_the_gateway_is_stopping():
         async with rsh.open_group() as group:
             place = rsht.InLoop(services={"t.late": late})
             async with (
-                group.spawn(place, close_timeout=0.4) as gateway,
+                group.spawn(
+                    place, teardown=rsh.Teardown(stop=0.2, drain=0.2)
+                ) as gateway,
                 gateway.open("t.late") as channel,
             ):
                 await channel.receive()

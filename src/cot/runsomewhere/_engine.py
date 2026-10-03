@@ -25,6 +25,7 @@ from . import _errors
 from ._errors import StateError
 from ._gateway import Group, WorkerInfo
 from ._places import Place, place_from_value
+from ._shutdown import Shutdown, Teardown
 from ._values import decode, encode
 
 if TYPE_CHECKING:
@@ -174,8 +175,9 @@ class HostServer:
         self._objects[handle] = holder.value
         return handle, holder.value
 
-    async def op_open_group(self) -> int:
-        handle, _ = await self._hold(Group())
+    async def op_open_group(self, shutdown: dict[str, Any] | None) -> int:
+        policy = None if shutdown is None else Shutdown.from_value(shutdown)
+        handle, _ = await self._hold(Group(shutdown=policy))
         return handle
 
     async def op_spawn(
@@ -183,14 +185,13 @@ class HostServer:
         group: int,
         place: Place | dict[str, Any],
         services: dict[str, bool] | None,
-        close_timeout: float,
+        teardown: dict[str, Any] | None,
     ) -> tuple[int, dict[str, Any], frozenset[str]]:
         if isinstance(place, dict):
             place = place_from_value(place)
+        targets = None if teardown is None else Teardown.from_value(teardown)
         handle, gateway = await self._hold(
-            self._objects[group].spawn(
-                place, services=services, close_timeout=close_timeout
-            )
+            self._objects[group].spawn(place, services=services, teardown=targets)
         )
         worker = gateway.worker
         info = {
@@ -465,12 +466,13 @@ class AsyncHostedGroup:
     """`rsh.open_group()` under `rsh.use_engine`: the async API, run in an
     engine host."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, shutdown: Shutdown | None = None) -> None:
         self.engine = engine.host()
+        self.shutdown = shutdown or Shutdown()
         self._handle: int | None = None
 
     async def __aenter__(self) -> Self:
-        self._handle = await self.engine.acall("open_group")
+        self._handle = await self.engine.acall("open_group", self.shutdown.to_value())
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
@@ -482,11 +484,13 @@ class AsyncHostedGroup:
         place: Place,
         *,
         services: dict[str, bool] | None = None,
-        close_timeout: float = 5.0,
+        teardown: Teardown | None = None,
     ) -> _AsyncHostedScope:
+        targets = None if teardown is None else teardown.to_value()
+
         async def enter() -> tuple[int, AsyncHostedGateway]:
             handle, info, offered = await self.engine.acall(
-                "spawn", self._handle, self.engine.place(place), services, close_timeout
+                "spawn", self._handle, self.engine.place(place), services, targets
             )
             return handle, AsyncHostedGateway(self.engine, handle, info, offered)
 

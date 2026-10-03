@@ -57,7 +57,8 @@ async def test_a_crashed_worker_surfaces_as_worker_gone():
 
 async def test_leaving_the_spawn_block_kills_a_worker_that_will_not_stop():
     async with rsh.open_group() as group:
-        async with group.spawn(rsh.Process(), close_timeout=0.5) as gateway:
+        targets = rsh.Teardown(stop=0.25, drain=0.25)
+        async with group.spawn(rsh.Process(), teardown=targets) as gateway:
             pid = gateway.worker.pid
             async with gateway.open("rsh_test_services.stubborn"):
                 pass
@@ -87,15 +88,15 @@ async def test_an_interpreter_without_runsomewhere_is_not_bootstrapped_silently(
 
 
 async def test_a_wedged_worker_is_forced_after_one_budget_not_one_per_step():
-    budget = 2.0
+    targets = rsh.Teardown(stop=1.0, drain=1.0)
     async with rsh.open_group() as group:
-        async with group.spawn(rsh.Process(), close_timeout=budget) as gateway:
+        async with group.spawn(rsh.Process(), teardown=targets) as gateway:
             pid = gateway.worker.pid
             async with gateway.open("rsh_test_services.wedge"):
                 await anyio.sleep(0.2)
             start = time.monotonic()
     # one budget, then terminate (ignored), then the kill; not a budget each
-    assert time.monotonic() - start < budget + 2.5
+    assert time.monotonic() - start < targets.total + 2.5
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
 
@@ -103,7 +104,8 @@ async def test_a_wedged_worker_is_forced_after_one_budget_not_one_per_step():
 async def test_a_cancelled_scope_forces_the_worker_without_waiting_the_budget():
     with anyio.CancelScope() as scope:
         async with rsh.open_group() as group:
-            async with group.spawn(rsh.Process(), close_timeout=30) as gateway:
+            targets = rsh.Teardown(stop=15, drain=15)
+            async with group.spawn(rsh.Process(), teardown=targets) as gateway:
                 pid = gateway.worker.pid
                 async with gateway.open("rsh_test_services.wedge"):
                     await anyio.sleep(0.2)
@@ -130,7 +132,9 @@ async def test_terminating_a_relay_forces_a_wedged_worker_behind_it():
     # by a relay that just died
     async with rsh.open_group() as group:
         async with group.spawn(rsh.Process()) as relay:
-            async with relay.spawn(rsh.Process()) as leaf:
+            # the relay falls back on the targets sent with the tunnel
+            targets = rsh.Teardown(stop=0.2, drain=0.3)
+            async with relay.spawn(rsh.Process(), teardown=targets) as leaf:
                 async with leaf.open("rsh_test_services.wedge"):
                     await anyio.sleep(0.2)
                     os.kill(relay.worker.pid, signal.SIGTERM)
@@ -165,3 +169,16 @@ async def test_exiting_with_a_group_left_open_forces_its_wedged_worker(engine):
     with anyio.fail_after(2):
         while not _gone(pid):
             await anyio.sleep(0.05)
+
+
+def test_a_groups_policy_reaches_its_workers_through_the_sync_facade():
+    policy = rsh.Shutdown(edge=rsh.Teardown(stop=0.5, drain=0.5))
+    with rsh.sync.open_group(shutdown=policy) as group:
+        with group.spawn(rsh.Process()) as gateway:
+            pid = gateway.worker.pid
+            with gateway.open("rsh_test_services.wedge"):
+                time.sleep(0.2)
+            start = time.monotonic()
+    # the default targets would take five seconds before force
+    assert time.monotonic() - start < policy.edge.total + 2.5
+    assert _gone(pid)

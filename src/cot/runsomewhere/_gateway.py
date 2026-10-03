@@ -17,6 +17,7 @@ from ._errors import HandshakeRefused, RemoteError, StateError
 from ._frames import FrameType
 from ._handshake import Hello, check_peer
 from ._places import Launched, Place
+from ._shutdown import Shutdown, Teardown
 from ._tunnel import ChannelByteStream
 from ._values import decode, encode
 from ._version import version as __version__
@@ -29,8 +30,6 @@ if TYPE_CHECKING:
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup
-
-DEFAULT_CLOSE_TIMEOUT = 5.0
 
 
 class Client:
@@ -73,7 +72,8 @@ class WorkerInfo:
 
 
 class Group:
-    def __init__(self) -> None:
+    def __init__(self, *, shutdown: Shutdown | None = None) -> None:
+        self.shutdown = shutdown or Shutdown()
         self._task_group: anyio.abc.TaskGroup | None = None
         self._closed = False
 
@@ -105,12 +105,14 @@ class Group:
         *,
         services: Mapping[str, bool] | None = None,
         deploy: Any = None,
-        close_timeout: float = DEFAULT_CLOSE_TIMEOUT,
+        teardown: Teardown | None = None,
     ) -> _Spawn:
+        """Start a worker at ``place``; ``teardown`` overrides the targets the
+        group's shutdown policy gives it."""
         if deploy is not None:
             msg = "deploying on spawn is not implemented yet"
             raise StateError(msg)
-        return _Spawn(self, place, place.launch, services, close_timeout)
+        return _Spawn(self, place, place.launch, services, teardown)
 
     def _tasks(self) -> anyio.abc.TaskGroup:
         if self._task_group is None or self._closed:
@@ -128,11 +130,13 @@ class Gateway:
         worker: WorkerInfo,
         services: frozenset[str],
         group: Group,
+        spawn: _Spawn,
     ) -> None:
         self._connection = connection
         self.worker = worker
         self.services = services
         self._group = group
+        self._spawn_scope = spawn
         self._closed = False
 
     def __repr__(self) -> str:
@@ -153,13 +157,18 @@ class Gateway:
         place: Place,
         *,
         services: Mapping[str, bool] | None = None,
-        close_timeout: float = DEFAULT_CLOSE_TIMEOUT,
+        teardown: Teardown | None = None,
     ) -> _Spawn:
-        """Spawn a worker reachable from this one, tunnelled through it."""
+        """Spawn a worker reachable from this one, tunnelled through it; this
+        worker becomes a proxy in the teardown graph."""
+        leaf = teardown or self._group.shutdown.edge
 
         async def launch(_task_group: anyio.abc.TaskGroup) -> Launched:
             self._require("rsh.via")
-            channel = await self._open_channel("rsh.via", {"place": place.to_value()})
+            # the leaf's targets, for the relay to fall back on when the
+            # caller cannot drive the teardown
+            params = {"place": place.to_value(), "teardown": leaf.to_value()}
+            channel = await self._open_channel("rsh.via", params)
 
             async def exited() -> None:
                 # the relay closes the tunnel once its leaf has exited
@@ -171,7 +180,8 @@ class Gateway:
 
             return Launched(ChannelByteStream(channel), exited, force)
 
-        return _Spawn(self._group, place, launch, services, close_timeout)
+        self._spawn_scope.proxy = True
+        return _Spawn(self._group, place, launch, services, teardown)
 
     def _opener(
         self, service: str, params: dict[str, Any]
@@ -265,13 +275,15 @@ class _Spawn:
         place: Place,
         launch: Callable[[anyio.abc.TaskGroup], Awaitable[Launched]],
         services: Mapping[str, bool] | None,
-        close_timeout: float,
+        teardown: Teardown | None,
     ) -> None:
         self._group = group
         self._place = place
         self._launch = launch
         self._services = dict(services or {})
-        self._close_timeout = close_timeout
+        self._teardown = teardown
+        #: whether workers were spawned through this one
+        self.proxy = False
         self._connection_scope = anyio.CancelScope(shield=True)
         self._connection_done = anyio.Event()
         self._launched: Launched | None = None
@@ -304,7 +316,11 @@ class _Spawn:
             await self._close(graceful=False)
             raise
         self._gateway = Gateway(
-            connection, WorkerInfo.from_hello(remote), answer["services"], self._group
+            connection,
+            WorkerInfo.from_hello(remote),
+            answer["services"],
+            self._group,
+            self,
         )
         return self._gateway
 
@@ -332,16 +348,17 @@ class _Spawn:
             # without a gateway-close, the end of the stream is what tells the
             # worker to go
             self._connection_scope.cancel()
+        policy = self._group.shutdown
+        targets = self._teardown or (policy.proxy if self.proxy else policy.edge)
         start = anyio.current_time()
-        end = start + self._close_timeout
+        end = start + targets.total
         exited = False
         try:
             await checkpoint_if_cancelled()
             with anyio.move_on_at(end):
                 if healthy:
                     assert connection is not None
-                    # until a shutdown policy splits it, stopping gets half
-                    await _stop_left_open(connection, start + self._close_timeout / 2)
+                    await _stop_left_open(connection, start + targets.stop)
                     remaining = max(0.0, end - anyio.current_time())
                     connection.send_frame(
                         FrameType.GATEWAY_CLOSE, 0, encode({"deadline": remaining})

@@ -149,7 +149,8 @@ async def test_a_sync_handler_left_running_is_reported_when_its_worker_exits():
     async def leave_it_running():
         async with rsh.open_group() as group:
             place = rsht.InLoop(services={"t.deaf": deaf})
-            async with group.spawn(place, close_timeout=0.6) as gateway:
+            targets = rsh.Teardown(stop=0.1, drain=0.6)
+            async with group.spawn(place, teardown=targets) as gateway:
                 async with gateway.open("t.deaf"):
                     await anyio.wait_all_tasks_blocked()
 

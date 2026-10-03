@@ -20,6 +20,7 @@ from ._errors import HandshakeRefused
 from ._frames import FrameType
 from ._handshake import Hello, check_peer
 from ._places import place_from_value
+from ._shutdown import Teardown
 from ._thread_channel import ThreadChannel
 from ._tunnel import relay
 from ._values import decode, encode
@@ -136,14 +137,17 @@ class WorkerCore:
             waiting.cancel_scope.cancel()
         return self._close_deadline
 
-    def _relay_budget(self) -> float:
-        # a relay closes its leaf before this worker gives up on the relay,
-        # so the deadline shrinks by a margin at every hop
-        if self._closing_at is None:
-            # not shutting down: the leaf ended its stream, and gets a moment
-            # to finish exiting
-            return HOP_MARGIN
-        return max(0.0, self._closing_at - anyio.current_time() - HOP_MARGIN)
+    def _leaf_budget(self, leaf: Teardown) -> Callable[[], float]:
+        def budget() -> float:
+            if self._closing_at is None:
+                # not shutting down: the leaf ended its stream, and gets a
+                # moment to finish exiting
+                return HOP_MARGIN
+            # the caller could not drive the teardown: fall back on the
+            # targets it sent with the tunnel
+            return leaf.total
+
+        return budget
 
     async def _stop_handlers(self, deadline: float) -> None:
         """Close every channel, and give the handlers until the deadline to
@@ -238,8 +242,15 @@ class WorkerCore:
     async def _remote_exec(self, channel: Channel) -> None:
         await _remote_exec.serve(channel)
 
-    async def _via(self, channel: Channel, *, place: dict[str, Any]) -> None:
-        await relay(channel, place_from_value(place), self._relay_budget)
+    async def _via(
+        self,
+        channel: Channel,
+        *,
+        place: dict[str, Any],
+        teardown: dict[str, Any] | None = None,
+    ) -> None:
+        leaf = Teardown() if teardown is None else Teardown.from_value(teardown)
+        await relay(channel, place_from_value(place), self._leaf_budget(leaf))
 
     async def _not_yet(self, channel: Channel, **params: Any) -> None:
         msg = "this built-in service is not implemented yet"
