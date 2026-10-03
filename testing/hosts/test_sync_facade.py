@@ -116,3 +116,13 @@ def test_drain_through_the_sync_facade_carries_the_counts(engine):
                     with pytest.raises(rsh.ItemsDiscarded) as excinfo:
                         channel.drain(timeout=5)
                     assert (excinfo.value.taken, excinfo.value.discarded) == (1, 2)
+
+
+def test_stop_through_the_sync_facade(engine):
+    with rsh.use_engine(engine):
+        with rsh.sync.open_group() as group:
+            with group.spawn(rsht.InLoop()) as gateway:
+                with gateway.open("rsh_test_services.until_stopped") as channel:
+                    channel.stop()
+                    assert channel.receive(timeout=5) == "bye"
+                    assert channel.wait_closed(timeout=5) == "stopped"

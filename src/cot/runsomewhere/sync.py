@@ -141,6 +141,9 @@ class Channel:
     def drain(self, timeout: float | None = None) -> None:
         self._engine.call("drain", self._handle, timeout)
 
+    def stop(self, deadline: float | None = None) -> None:
+        self._engine.call("stop", self._handle, deadline)
+
     def close_send(self) -> None:
         self._engine.call("close_send", self._handle)
 
@@ -173,6 +176,9 @@ class _NonSuspending:
 
     async def drain(self) -> None:
         self._channel.drain()
+
+    def stop(self, deadline: float | None = None) -> None:
+        self._channel.stop(deadline)
 
     def close_send(self) -> None:
         self._channel.close_send()

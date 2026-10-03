@@ -222,6 +222,9 @@ class HostServer:
         with anyio.fail_after(timeout):
             await self._objects[channel].drain()
 
+    async def op_stop(self, channel: int, deadline: float | None) -> None:
+        self._objects[channel].stop(deadline)
+
     async def op_close_send(self, channel: int) -> None:
         self._objects[channel].close_send()
 
@@ -523,6 +526,9 @@ class AsyncHostedChannel:
     # waited for, so the caller's loop never blocks on the host
     async def drain(self) -> None:
         await self._engine.acall("drain", self._handle, None)
+
+    def stop(self, deadline: float | None = None) -> None:
+        self._engine.submit("stop", self._handle, deadline)
 
     def close_send(self) -> None:
         self._engine.submit("close_send", self._handle)

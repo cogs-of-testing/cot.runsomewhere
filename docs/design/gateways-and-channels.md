@@ -86,7 +86,9 @@ as `channel.stopping` and can wait for it with `await channel.stop_requested()`;
 a sync handler polls `channel.stopping` or waits with
 `channel.wait_stopping(timeout)`. Code sent with [remote exec](remote-exec.md)
 gets the same. A stop carries a deadline, relative so clocks need not agree;
-it is best effort: the worker passes it on and honours it where it can, and
+it is best effort: the worker passes it on, to an async handler as
+`channel.stop_deadline` on its event loop's clock, and honours it where it
+can, and
 what enforces it is the caller, which closes the channel when it passes. A
 handler that ignores its stop is closed like any other. A stop for a handler
 that already returned is ignored, since that race is normal.

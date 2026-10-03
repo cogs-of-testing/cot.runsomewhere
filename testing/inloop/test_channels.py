@@ -293,3 +293,57 @@ async def test_drain_raises_worker_gone_when_the_link_is_cut():
             pipe.cut()
             with anyio.fail_after(1), pytest.raises(rsh.WorkerGone):
                 await channel.drain()
+
+
+async def test_a_stopped_handler_sends_what_it_owes_and_closes_with_a_result(gateway):
+    async with gateway.open("rsh_test_services.until_stopped") as channel:
+        channel.stop()
+        with anyio.fail_after(1):
+            assert await channel.receive() == "bye"
+            assert await channel.wait_closed() == "stopped"
+
+
+async def test_a_sync_handler_waits_for_its_stop(gateway):
+    async with gateway.open("rsh_test_services.sync_until_stopped") as channel:
+        channel.stop()
+        with anyio.fail_after(5):
+            assert await channel.receive() == "bye"
+            assert await channel.wait_closed() == "stopped"
+
+
+async def test_a_stop_cancels_nothing_and_carries_its_deadline_as_advice():
+    seen = []
+
+    async def watch(channel):
+        await channel.stop_requested()
+        seen.append(channel.stop_deadline - anyio.current_time())
+        return await channel.receive()
+
+    async with open_inloop(services={"t.watch": watch}) as gateway:
+        async with gateway.open("t.watch") as channel:
+            channel.stop(deadline=30)
+            await channel.send("still heard")
+            with anyio.fail_after(1):
+                assert await channel.wait_closed() == "still heard"
+    assert 0 < seen[0] <= 30
+
+
+async def test_a_stop_after_the_handler_returned_is_ignored(gateway):
+    async with gateway.open("rsh_test_services.produce", count=0, size=1) as channel:
+        await channel.wait_closed()
+        channel.stop()
+
+
+async def test_a_client_stops_its_service():
+    async def until_stopped(channel):
+        await channel.stop_requested()
+        return "stopped"
+
+    class Stoppable(rsh.Client, service="t.until_stopped"):
+        pass
+
+    async with open_inloop(services={"t.until_stopped": until_stopped}) as gateway:
+        async with gateway.open(Stoppable) as client:
+            client.stop()
+            with anyio.fail_after(1):
+                assert await client.channel.wait_closed() == "stopped"

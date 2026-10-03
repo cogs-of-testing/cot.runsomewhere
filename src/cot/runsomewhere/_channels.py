@@ -53,6 +53,10 @@ class Channel:
         self._peer_closed = anyio.Event()
         self._failure: BaseException | None = None
         self._receivers_waiting = 0
+        self._stop_requested = anyio.Event()
+        #: when the peer asked for this channel's work to be done, on this
+        #: side's event loop clock; best effort, the peer enforces it
+        self.stop_deadline: float | None = None
         #: set by the worker for a service's channel; cancelled on a close the
         #: handler is not waiting for
         self.handler_scope: anyio.CancelScope | None = None
@@ -150,6 +154,26 @@ class Channel:
     async def aclose(self) -> None:
         self.close()
         await cancel_shielded_checkpoint()
+
+    def stop(self, deadline: float | None = None) -> None:
+        """Ask the peer to finish: send what it owes and close with a result.
+
+        Nothing is cancelled or dropped, and both directions stay open.
+        ``deadline`` is in seconds from now, and only advice to the peer.
+        """
+        if self._closed_locally or self._peer_close is not None:
+            return
+        info = {} if deadline is None else {"deadline": deadline}
+        self._connection.send_frame(FrameType.STOP, self.id, encode(info))
+
+    @property
+    def stopping(self) -> bool:
+        """Whether the peer asked this side to finish."""
+        return self._stop_requested.is_set()
+
+    async def stop_requested(self) -> None:
+        """Wait until the peer asks this side to finish."""
+        await self._stop_requested.wait()
 
     def close_send(self) -> None:
         """End sending: the peer takes what was sent, then sees the end."""
@@ -252,6 +276,11 @@ class Channel:
         # is cancelled
         if not waited_for and self.handler_scope is not None:
             self.handler_scope.cancel()
+
+    def _stopped_by_peer(self, info: dict[str, Any]) -> None:
+        if "deadline" in info:
+            self.stop_deadline = anyio.current_time() + info["deadline"]
+        self._stop_requested.set()
 
     def _fail(self, error: BaseException) -> None:
         if self._failure is None:
@@ -444,6 +473,11 @@ class Connection:
             channel = self._channels.get(frame.channel)
             if channel is not None:
                 channel._grant(int(_CREDIT.unpack(frame.payload)[0]))
+        elif kind == FrameType.STOP:
+            # a stop for a channel already closed found its work done
+            channel = self._channels.get(frame.channel)
+            if channel is not None:
+                channel._stopped_by_peer(decode(frame.payload))
         elif kind == FrameType.CLOSE:
             channel = self._channels.get(frame.channel)
             if channel is not None:

@@ -44,6 +44,19 @@ async def take(channel, *, count, delay=0):
     return [await channel.receive() for _ in range(count)]
 
 
+async def until_stopped(channel):
+    await channel.stop_requested()
+    await channel.send("bye")
+    return "stopped"
+
+
+def sync_until_stopped(channel):
+    if not channel.wait_stopping(timeout=5):
+        return "never stopped"
+    channel.send("bye")
+    return "stopped"
+
+
 async def fail(channel, *, message):
     raise ValueError(message)
 

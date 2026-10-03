@@ -71,3 +71,14 @@ async def test_drain_through_an_engine_host_returns_once_taken(engine):
                     with anyio.fail_after(5):
                         await channel.drain()
                         assert await channel.wait_closed() == [0, 1, 2]
+
+
+async def test_stop_through_an_engine_host(engine):
+    with rsh.use_engine(engine):
+        async with rsh.open_group() as group:
+            async with group.spawn(rsht.InLoop()) as gateway:
+                async with gateway.open("rsh_test_services.until_stopped") as channel:
+                    channel.stop()
+                    with anyio.fail_after(5):
+                        assert await channel.receive() == "bye"
+                        assert await channel.wait_closed() == "stopped"

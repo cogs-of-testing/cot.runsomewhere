@@ -107,6 +107,7 @@ def test_frame_types_cover_the_designed_set():
         "CREDIT",
         "CLOSE",
         "GATEWAY_CLOSE",
+        "STOP",
     }
 
 

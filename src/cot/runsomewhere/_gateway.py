@@ -44,6 +44,10 @@ class Client:
     def __init__(self, channel: Any) -> None:
         self.channel = channel
 
+    def stop(self, deadline: float | None = None) -> None:
+        """Ask the service to finish; see `Channel.stop`."""
+        self.channel.stop(deadline)
+
 
 ClientT = TypeVar("ClientT", bound=Client)
 OpenedT = TypeVar("OpenedT")
