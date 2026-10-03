@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
 
@@ -87,6 +88,13 @@ def stubborn(channel):
     # ignores its closed channel, so only killing the worker ends it
     while True:
         time.sleep(0.1)
+
+
+async def wedge(channel):
+    # blocks the worker's event loop and ignores SIGTERM: only a kill ends it
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(0.1)  # noqa: ASYNC251 - blocking the loop is the point
 
 
 class Echo(rsh.Client, service="rsh_test_services.echo"):

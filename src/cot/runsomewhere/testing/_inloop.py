@@ -59,13 +59,11 @@ class InLoop(Place):
 
         task_group.start_soon(run)
 
-        async def close(timeout: float) -> None:
-            with anyio.move_on_after(timeout):
-                await done.wait()
+        async def force() -> None:
             scope.cancel()
             await done.wait()
 
-        return Launched(pipe.caller_end, close)
+        return Launched(pipe.caller_end, done.wait, force)
 
 
 @asynccontextmanager

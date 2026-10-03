@@ -1,4 +1,5 @@
 import platform
+import threading
 
 import anyio
 import pytest
@@ -137,3 +138,23 @@ async def test_a_failing_service_does_not_take_the_worker_down(gateway):
     async with gateway.open("rsh_test_services.echo") as channel:
         await channel.send("still here")
         assert await channel.receive() == "still here"
+
+
+async def test_a_sync_handler_left_running_is_reported_when_its_worker_exits():
+    release = threading.Event()
+
+    def deaf(channel):
+        release.wait(5)
+
+    async def leave_it_running():
+        async with rsh.open_group() as group:
+            place = rsht.InLoop(services={"t.deaf": deaf})
+            async with group.spawn(place, close_timeout=0.6) as gateway:
+                async with gateway.open("t.deaf"):
+                    await anyio.wait_all_tasks_blocked()
+
+    try:
+        with pytest.warns(ResourceWarning, match="t.deaf"):
+            await leave_it_running()
+    finally:
+        release.set()

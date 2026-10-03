@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     from ._channels import Channel
     from ._places import Place
 
+#: how long a relay waits for its leaf to exit before the place forces it
+RELAY_CLOSE_TIMEOUT = 5.0
+
 
 class ChannelByteStream(anyio.abc.ByteStream):
     """Bytes items on a channel, seen as a byte stream."""
@@ -77,5 +80,10 @@ async def relay(channel: Channel, place: Place) -> None:
             with anyio.CancelScope(shield=True):
                 # the leaf waits for its stream to end before it exits
                 await stream.aclose()
-                await launched.close(5)
+                exited = False
+                with anyio.move_on_after(RELAY_CLOSE_TIMEOUT):
+                    await launched.exited()
+                    exited = True
+                if not exited:
+                    await launched.force()
             tg.cancel_scope.cancel()

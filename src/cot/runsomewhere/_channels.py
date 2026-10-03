@@ -382,6 +382,10 @@ class Connection:
         self._channels[channel.id] = channel
         return channel
 
+    def channels(self) -> list[Channel]:
+        """The channels open on this connection."""
+        return list(self._channels.values())
+
     def forget(self, channel: Channel) -> None:
         self._channels.pop(channel.id, None)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import os
+import warnings
 from collections.abc import Callable, Mapping
 from importlib.metadata import EntryPoint, entry_points
 from typing import Any
@@ -25,6 +26,10 @@ from ._values import decode, encode
 from ._version import version as __version__
 
 SERVICE_GROUP = "cot.runsomewhere.services"
+
+#: how much sooner than its caller's deadline a worker gives up on its
+#: handlers, so it has exited before the caller forces it
+HOP_MARGIN = 0.5
 
 Handler = Callable[..., Any]
 
@@ -57,6 +62,9 @@ class WorkerCore:
         else:
             self._handlers = dict(services)
         self._enabled: frozenset[str] = frozenset()
+        #: sync handlers still running in their threads, by a token of each call
+        self._in_threads: dict[object, str] = {}
+        self._running = 0
         self._task_group: anyio.abc.TaskGroup | None = None
         self._connection = Connection(stream, side="worker", on_open=self._on_open)
         self._hello = Hello.local(
@@ -71,6 +79,7 @@ class WorkerCore:
                 await self._serve(connection)
             finally:
                 connection.finish_sending()
+                self._warn_abandoned()
 
     async def _serve(self, connection: Connection) -> None:
         connection.send_frame(FrameType.HELLO, 0, encode(self._hello.to_value()))
@@ -97,9 +106,24 @@ class WorkerCore:
         )
         async with anyio.create_task_group() as handlers:
             self._task_group = handlers
+            deadline = 0.0
             with contextlib.suppress(OSError):
-                await connection.next_control(FrameType.GATEWAY_CLOSE)
+                frame = await connection.next_control(FrameType.GATEWAY_CLOSE)
+                if frame.payload:
+                    deadline = decode(frame.payload).get("deadline") or 0.0
+            await self._stop_handlers(max(0.0, deadline - HOP_MARGIN))
             handlers.cancel_scope.cancel()
+
+    async def _stop_handlers(self, deadline: float) -> None:
+        """Close every channel, and give the handlers until the deadline to
+        return before they are cancelled and their threads left."""
+        for channel in self._connection.channels():
+            if channel.handler_scope is not None:
+                channel.handler_scope.cancel()
+            channel.close()
+        with anyio.move_on_after(deadline):
+            while self._running:
+                await anyio.sleep(0.01)
 
     # -- services -------------------------------------------------------------
 
@@ -113,6 +137,15 @@ class WorkerCore:
         )
 
     async def _run_handler(
+        self, channel: Channel, name: str, params: dict[str, Any]
+    ) -> None:
+        self._running += 1
+        try:
+            await self._run_handler_in_scope(channel, name, params)
+        finally:
+            self._running -= 1
+
+    async def _run_handler_in_scope(
         self, channel: Channel, name: str, params: dict[str, Any]
     ) -> None:
         with anyio.CancelScope() as scope:
@@ -146,9 +179,27 @@ class WorkerCore:
             # a close from its next channel operation
             channel.handler_scope = scope
             return await handler(channel, **params)
-        return await anyio.to_thread.run_sync(
-            lambda: handler(ThreadChannel(channel), **params), abandon_on_cancel=True
-        )
+        token = object()
+        self._in_threads[token] = name
+
+        def run() -> Any:
+            try:
+                return handler(ThreadChannel(channel), **params)
+            finally:
+                self._in_threads.pop(token, None)
+
+        return await anyio.to_thread.run_sync(run, abandon_on_cancel=True)
+
+    def _warn_abandoned(self) -> None:
+        # a thread cannot be stopped from outside: all a worker can do with a
+        # handler that ignored its closed channel is leave it and say so
+        for name in list(self._in_threads.values()):
+            warnings.warn(
+                f"the sync handler of {name!r} ignored its closed channel and "
+                "was left running",
+                ResourceWarning,
+                stacklevel=1,
+            )
 
     async def _info(self, _channel: Channel) -> Any:
         return self._hello.to_value()

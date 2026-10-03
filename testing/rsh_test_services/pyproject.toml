@@ -26,3 +26,4 @@ dependencies = []
 "rsh_test_services.noisy_echo" = "rsh_test_services:noisy_echo"
 "rsh_test_services.crash" = "rsh_test_services:crash"
 "rsh_test_services.stubborn" = "rsh_test_services:stubborn"
+"rsh_test_services.wedge" = "rsh_test_services:wedge"

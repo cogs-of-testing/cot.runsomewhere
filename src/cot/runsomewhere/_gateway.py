@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
 
 import anyio
 import anyio.abc
-from anyio.lowlevel import cancel_shielded_checkpoint
+from anyio.lowlevel import cancel_shielded_checkpoint, checkpoint_if_cancelled
 
 from ._channels import Channel, Connection
-from ._errors import HandshakeRefused, StateError
+from ._errors import HandshakeRefused, RemoteError, StateError
 from ._frames import FrameType
 from ._handshake import Hello, check_peer
 from ._places import Launched, Place
@@ -159,10 +160,15 @@ class Gateway:
             self._require("rsh.via")
             channel = await self._open_channel("rsh.via", {"place": place.to_value()})
 
-            async def close(_timeout: float) -> None:
+            async def exited() -> None:
+                # the relay closes the tunnel once its leaf has exited
+                with contextlib.suppress(OSError, RemoteError):
+                    await channel.wait_closed()
+
+            async def force() -> None:
                 channel.close()
 
-            return Launched(ChannelByteStream(channel), close)
+            return Launched(ChannelByteStream(channel), exited, force)
 
         return _Spawn(self._group, place, launch, services, close_timeout)
 
@@ -267,8 +273,7 @@ class _Spawn:
                 decode((await connection.next_control(FrameType.CONFIG)).payload)
             )
         except BaseException:
-            with anyio.CancelScope(shield=True):
-                await self._close(graceful=False)
+            await self._close(graceful=False)
             raise
         self._gateway = Gateway(
             connection, WorkerInfo.from_hello(remote), answer["services"], self._group
@@ -276,8 +281,7 @@ class _Spawn:
         return self._gateway
 
     async def __aexit__(self, *exc_info: object) -> None:
-        with anyio.CancelScope(shield=True):
-            await self._close(graceful=True)
+        await self._close(graceful=True)
 
     async def _run_connection(self, connection: Connection) -> None:
         # shielded inside the task, so an outer cancel does not cut a graceful
@@ -289,15 +293,32 @@ class _Spawn:
             self._connection_done.set()
 
     async def _close(self, *, graceful: bool) -> None:
+        """Ask the worker to exit, wait for it until the deadline, then have the
+        place force it. A cancelled scope goes straight to force."""
         if self._gateway is not None:
             self._gateway._closed = True
         connection = self._connection
         if graceful and connection is not None and connection.failure is None:
-            connection.send_frame(FrameType.GATEWAY_CLOSE, 0)
+            connection.send_frame(
+                FrameType.GATEWAY_CLOSE, 0, encode({"deadline": self._close_timeout})
+            )
+        else:
+            # without a gateway-close, the end of the stream is what tells the
+            # worker to go
+            self._connection_scope.cancel()
+        exited = False
+        try:
+            await checkpoint_if_cancelled()
             with anyio.move_on_after(self._close_timeout):
-                await connection.gone.wait()
-        self._connection_scope.cancel()
-        if connection is not None:
-            await self._connection_done.wait()
-        if self._launched is not None:
-            await self._launched.close(self._close_timeout)
+                if connection is not None:
+                    await connection.gone.wait()
+                if self._launched is not None:
+                    await self._launched.exited()
+                exited = True
+        finally:
+            with anyio.CancelScope(shield=True):
+                self._connection_scope.cancel()
+                if connection is not None:
+                    await self._connection_done.wait()
+                if self._launched is not None and not exited:
+                    await self._launched.force()

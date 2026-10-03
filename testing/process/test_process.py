@@ -60,7 +60,7 @@ async def test_leaving_the_spawn_block_kills_a_worker_that_will_not_stop():
             pid = gateway.worker.pid
             async with gateway.open("rsh_test_services.stubborn"):
                 pass
-        start = time.monotonic()
+            start = time.monotonic()
     assert time.monotonic() - start < 5
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
@@ -83,3 +83,32 @@ async def test_an_interpreter_without_runsomewhere_is_not_bootstrapped_silently(
         with pytest.raises(rsh.StateError, match="bootstrap"):
             async with group.spawn(rsh.Process(python=str(python))):
                 pass
+
+
+async def test_a_wedged_worker_is_forced_after_one_budget_not_one_per_step():
+    budget = 2.0
+    async with rsh.open_group() as group:
+        async with group.spawn(rsh.Process(), close_timeout=budget) as gateway:
+            pid = gateway.worker.pid
+            async with gateway.open("rsh_test_services.wedge"):
+                await anyio.sleep(0.2)
+            start = time.monotonic()
+    # one budget, then terminate (ignored), then the kill; not a budget each
+    assert time.monotonic() - start < budget + 2.5
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+async def test_a_cancelled_scope_forces_the_worker_without_waiting_the_budget():
+    with anyio.CancelScope() as scope:
+        async with rsh.open_group() as group:
+            async with group.spawn(rsh.Process(), close_timeout=30) as gateway:
+                pid = gateway.worker.pid
+                async with gateway.open("rsh_test_services.wedge"):
+                    await anyio.sleep(0.2)
+                    start = time.monotonic()
+                    scope.cancel()
+                    await anyio.sleep_forever()
+    assert time.monotonic() - start < 5
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
