@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from ._engine import Host, SubinterpreterEngine, ThreadEngine, host_for
+from ._engine import DEFAULT_ENGINE, Engine, Host, selected_engine
 from ._errors import ChannelClosed, StateError
 from ._gateway import WorkerInfo
 
@@ -36,8 +36,10 @@ def _refuse_inside_event_loop() -> None:
     raise StateError(msg)
 
 
-def open_group(*, engine: ThreadEngine | SubinterpreterEngine | None = None) -> Group:
-    return Group(engine)
+def open_group() -> Group:
+    """The scope gateways are spawned in, run in the engine set with
+    ``rsh.use_engine``, or in the default engine."""
+    return Group(selected_engine() or DEFAULT_ENGINE)
 
 
 class _Scope:
@@ -62,14 +64,14 @@ class _Scope:
 
 
 class Group:
-    def __init__(self, engine: ThreadEngine | SubinterpreterEngine | None) -> None:
-        self._selector = engine
+    def __init__(self, engine: Engine) -> None:
+        self._selected = engine
         self.engine: Host | None = None
         self._handle: int | None = None
 
     def __enter__(self) -> Self:
         _refuse_inside_event_loop()
-        self.engine = host_for(self._selector)
+        self.engine = self._selected.host()
         self._handle = self.engine.call("open_group")
         return self
 

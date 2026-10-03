@@ -5,7 +5,7 @@
 
 from . import sync
 from ._channels import Channel
-from ._engine import SubinterpreterEngine, ThreadEngine
+from ._engine import SubinterpreterEngine, ThreadEngine, use_engine
 from ._errors import (
     ChannelClosed,
     HandshakeRefused,
@@ -44,4 +44,5 @@ __all__ = [
     "can_send",
     "open_group",
     "sync",
+    "use_engine",
 ]

@@ -14,7 +14,9 @@ import importlib
 import itertools
 import queue
 import threading
-from typing import TYPE_CHECKING, Any
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import anyio
 import anyio.abc
@@ -27,23 +29,67 @@ from ._places import Place, place_from_value
 from ._values import decode, encode
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from typing_extensions import Self
 
 Message = tuple[Any, ...]
 
 
-class ThreadEngine:
-    """Selects the thread host: an event loop on a dedicated OS thread."""
+class Engine:
+    """Where the facades run the async core; its host starts on first use."""
+
+    kind: ClassVar[str]
+
+    def __init__(self) -> None:
+        self._host: Host | None = None
+        self._lock = threading.Lock()
+
+    def host(self) -> Host:
+        with self._lock:
+            if self._host is None:
+                self._host = Host(self.kind)
+            return self._host
+
+
+class ThreadEngine(Engine):
+    """The thread host: an event loop on a dedicated OS thread."""
 
     kind = "thread"
 
 
-class SubinterpreterEngine:
-    """Selects the subinterpreter host: an event loop in its own interpreter."""
+class SubinterpreterEngine(Engine):
+    """The subinterpreter host: an event loop on a thread in its own
+    interpreter, with its own GIL. Python 3.14 and newer."""
 
     kind = "subinterpreter"
+
+
+#: used by the facades when no override is set; its host starts lazily
+DEFAULT_ENGINE = ThreadEngine()
+
+_selected: ContextVar[Engine | None] = ContextVar(
+    "cot.runsomewhere.engine", default=None
+)
+
+
+@contextmanager
+def use_engine(engine: Engine) -> Iterator[Engine]:
+    """Open groups in this context through ``engine``.
+
+    The sync facade uses it instead of the default engine; the async API runs
+    through it instead of in the caller's loop.
+    """
+    token = _selected.set(engine)
+    try:
+        yield engine
+    finally:
+        _selected.reset(token)
+
+
+def selected_engine() -> Engine | None:
+    """The engine set with :func:`use_engine` in this context, if any."""
+    return _selected.get()
 
 
 # -- the host side ------------------------------------------------------------
@@ -371,26 +417,15 @@ class Host:
             self._interpreter.close()
 
 
-_hosts: dict[str, Host] = {}
-_hosts_lock = threading.Lock()
-
-
-def host_for(engine: ThreadEngine | SubinterpreterEngine | None) -> Host:
-    kind = "thread" if engine is None else engine.kind
-    with _hosts_lock:
-        if kind not in _hosts:
-            _hosts[kind] = Host(kind)
-        return _hosts[kind]
-
-
 # -- the async facade ---------------------------------------------------------
 
 
 class AsyncHostedGroup:
-    """`rsh.open_group(engine=...)`: the async API, run in an engine host."""
+    """`rsh.open_group()` under `rsh.use_engine`: the async API, run in an
+    engine host."""
 
-    def __init__(self, engine: ThreadEngine | SubinterpreterEngine) -> None:
-        self.engine = host_for(engine)
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine.host()
         self._handle: int | None = None
 
     async def __aenter__(self) -> Self:

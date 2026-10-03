@@ -4,6 +4,9 @@ import pytest
 
 from cot import runsomewhere as rsh
 
+# one engine of each kind for the whole run: each starts its host on first use
+ENGINES = {"thread": rsh.ThreadEngine(), "subinterpreter": rsh.SubinterpreterEngine()}
+
 HOSTS = [
     pytest.param("thread", id="thread"),
     pytest.param(
@@ -18,6 +21,4 @@ HOSTS = [
 
 @pytest.fixture(params=HOSTS)
 def engine(request):
-    if request.param == "thread":
-        return rsh.ThreadEngine()
-    return rsh.SubinterpreterEngine()
+    return ENGINES[request.param]
