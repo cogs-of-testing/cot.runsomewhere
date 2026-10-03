@@ -1,4 +1,5 @@
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -112,3 +113,27 @@ async def test_a_cancelled_scope_forces_the_worker_without_waiting_the_budget():
     assert time.monotonic() - start < 5
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def _gone(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    stat = Path(f"/proc/{pid}/stat")
+    # an exited child not yet reaped by whoever inherited it
+    return stat.exists() and stat.read_text().split()[2] == "Z"
+
+
+async def test_terminating_a_relay_forces_a_wedged_worker_behind_it():
+    # a leaf that ignores the end of its stream and SIGTERM would be orphaned
+    # by a relay that just died
+    async with rsh.open_group() as group:
+        async with group.spawn(rsh.Process()) as relay:
+            async with relay.spawn(rsh.Process()) as leaf:
+                async with leaf.open("rsh_test_services.wedge"):
+                    await anyio.sleep(0.2)
+                    os.kill(relay.worker.pid, signal.SIGTERM)
+                    with anyio.fail_after(5):
+                        while not (_gone(relay.worker.pid) and _gone(leaf.worker.pid)):
+                            await anyio.sleep(0.05)

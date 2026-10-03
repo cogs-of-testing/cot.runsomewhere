@@ -65,6 +65,10 @@ class WorkerCore:
         #: sync handlers still running in their threads, by a token of each call
         self._in_threads: dict[object, str] = {}
         self._running = 0
+        self._close_requested = anyio.Event()
+        self._close_deadline = 0.0
+        #: when this worker stops waiting for its handlers, on the loop clock
+        self._closing_at: float | None = None
         self._task_group: anyio.abc.TaskGroup | None = None
         self._connection = Connection(stream, side="worker", on_open=self._on_open)
         self._hello = Hello.local(
@@ -106,13 +110,40 @@ class WorkerCore:
         )
         async with anyio.create_task_group() as handlers:
             self._task_group = handlers
+            deadline = max(0.0, await self._until_close(connection) - HOP_MARGIN)
+            self._closing_at = anyio.current_time() + deadline
+            await self._stop_handlers(deadline)
+            handlers.cancel_scope.cancel()
+
+    def request_close(self, deadline: float = 0.0) -> None:
+        """Shut down as on a gateway-close carrying ``deadline``."""
+        if not self._close_requested.is_set():
+            self._close_deadline = deadline
+            self._close_requested.set()
+
+    async def _until_close(self, connection: Connection) -> float:
+        async def gateway_close() -> None:
             deadline = 0.0
             with contextlib.suppress(OSError):
                 frame = await connection.next_control(FrameType.GATEWAY_CLOSE)
                 if frame.payload:
                     deadline = decode(frame.payload).get("deadline") or 0.0
-            await self._stop_handlers(max(0.0, deadline - HOP_MARGIN))
-            handlers.cancel_scope.cancel()
+            self.request_close(deadline)
+
+        async with anyio.create_task_group() as waiting:
+            waiting.start_soon(gateway_close)
+            await self._close_requested.wait()
+            waiting.cancel_scope.cancel()
+        return self._close_deadline
+
+    def _relay_budget(self) -> float:
+        # a relay closes its leaf before this worker gives up on the relay,
+        # so the deadline shrinks by a margin at every hop
+        if self._closing_at is None:
+            # not shutting down: the leaf ended its stream, and gets a moment
+            # to finish exiting
+            return HOP_MARGIN
+        return max(0.0, self._closing_at - anyio.current_time() - HOP_MARGIN)
 
     async def _stop_handlers(self, deadline: float) -> None:
         """Close every channel, and give the handlers until the deadline to
@@ -208,7 +239,7 @@ class WorkerCore:
         await _remote_exec.serve(channel)
 
     async def _via(self, channel: Channel, *, place: dict[str, Any]) -> None:
-        await relay(channel, place_from_value(place))
+        await relay(channel, place_from_value(place), self._relay_budget)
 
     async def _not_yet(self, channel: Channel, **params: Any) -> None:
         msg = "this built-in service is not implemented yet"
