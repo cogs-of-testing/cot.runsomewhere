@@ -137,3 +137,31 @@ async def test_terminating_a_relay_forces_a_wedged_worker_behind_it():
                     with anyio.fail_after(5):
                         while not (_gone(relay.worker.pid) and _gone(leaf.worker.pid)):
                             await anyio.sleep(0.05)
+
+
+LEFT_OPEN = """
+import time
+from cot import runsomewhere as rsh
+group = rsh.sync.open_group().__enter__()
+gateway = group.spawn(rsh.Process()).__enter__()
+gateway.open("rsh_test_services.wedge").__enter__()
+time.sleep(0.2)
+print(gateway.worker.pid, flush=True)
+"""
+
+
+@pytest.mark.parametrize("engine", ["ThreadEngine", "SubinterpreterEngine"])
+async def test_exiting_with_a_group_left_open_forces_its_wedged_worker(engine):
+    if engine == "SubinterpreterEngine" and sys.version_info < (3, 14):
+        pytest.skip("concurrent.interpreters needs 3.14")
+    script = LEFT_OPEN.replace(
+        "group = ", f"rsh.use_engine(rsh.{engine}()).__enter__()\ngroup = ", 1
+    )
+    start = time.monotonic()
+    with anyio.fail_after(10):
+        done = await anyio.run_process([sys.executable, "-c", script])
+    assert time.monotonic() - start < 8
+    pid = int(done.stdout)
+    with anyio.fail_after(2):
+        while not _gone(pid):
+            await anyio.sleep(0.05)

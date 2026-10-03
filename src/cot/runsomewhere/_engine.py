@@ -9,7 +9,6 @@ no object is shared between interpreters.
 
 from __future__ import annotations
 
-import atexit
 import importlib
 import itertools
 import queue
@@ -346,7 +345,16 @@ class Host:
         threading.Thread(
             target=self._dispatch, name=f"rsh-{kind}-replies", daemon=True
         ).start()
-        atexit.register(self.shutdown)
+        threading.Thread(
+            target=self._stop_after_main, name=f"rsh-{kind}-watch", daemon=True
+        ).start()
+
+    def _stop_after_main(self) -> None:
+        # at interpreter shutdown the main thread counts as finished before
+        # non-daemon threads are joined, so this wakes while the host, which
+        # is one, still runs; groups left open close as cancelled
+        threading.main_thread().join()
+        self.shutdown()
 
     def _start_thread_host(self) -> None:
         requests: queue.Queue[Message | None] = queue.Queue()
@@ -356,7 +364,7 @@ class Host:
             target=anyio.run,
             args=(HostServer().serve, requests.get, responses.put),
             name="rsh-thread-engine",
-            daemon=True,
+            daemon=False,
         )
         self._thread.start()
 
@@ -376,12 +384,20 @@ class Host:
         self._put = put
         self._get = lambda: tuple(decode(responses.get()))
         self._thread = threading.Thread(
-            target=self._interpreter.call,
-            args=(_subinterpreter_main, requests, responses),
+            target=self._run_subinterpreter,
+            args=(requests, responses),
             name="rsh-subinterpreter-engine",
-            daemon=True,
+            daemon=False,
         )
         self._thread.start()
+
+    def _run_subinterpreter(self, requests: Any, responses: Any) -> None:
+        # closed by this thread, which interpreter shutdown waits for, not by
+        # the watcher, which it does not
+        try:
+            self._interpreter.call(_subinterpreter_main, requests, responses)
+        finally:
+            self._interpreter.close()
 
     @property
     def thread_id(self) -> int | None:
@@ -435,10 +451,11 @@ class Host:
             raise StateError(msg) from None
 
     def shutdown(self) -> None:
+        """Close the groups still open, as cancelled, and stop the host."""
+        if not self._thread.is_alive():
+            return
         self._put(None)
-        self._thread.join(timeout=5)
-        if self.kind == "subinterpreter" and not self._thread.is_alive():
-            self._interpreter.close()
+        self._thread.join()
 
 
 # -- the async facade ---------------------------------------------------------

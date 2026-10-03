@@ -135,7 +135,10 @@ Three kinds of shutdown cascade differently:
   what runs behind it.
 - **An engine** shuts down every group still open, then stops its event loop
   and its thread or subinterpreter. It is stopped when the managing
-  process's main thread exits, without an `atexit` hook.
+  process's main thread exits, without an `atexit` hook: its host thread is
+  not a daemon, so interpreter shutdown waits for it, and a watcher that
+  joins the main thread wakes first and stops it. Groups still open close as
+  cancelled, which forces their workers.
 
 A channel the caller left open when its gateway, group or engine shuts down
 is drained as part of that shutdown, and the facades emit a `ResourceWarning`
@@ -151,7 +154,6 @@ Open:
   HTTP/2's GOAWAY settles the same race by naming the last stream it will
   serve; channel ids are allocated per side, so the gateway stop could name
   the last id of each.
-- How the engine host learns that the main thread has exited.
 
 ### Output
 
