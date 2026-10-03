@@ -9,24 +9,32 @@ Status: design. Decisions marked **proposed** are open for review.
 The parts of a system run as declared [services](services.md), from code
 deployed to the worker. Remote exec is the other way to run code: the caller
 sends it. It exists for ad-hoc work, debugging, probing a host, and code too
-small to be worth a package. It is the built-in service `rsh.remote_exec`,
-and it is **off by default**.
+small to be worth a package. It is a concession for that kind of work: the
+normal way to run code in a worker is a service declared by an entry point.
+It is the built-in service `rsh.remote_exec`, **off by default**, and it is
+used through its client like any other service:
 
 ```python
 async with group.spawn(rsh.Ssh("box"), services={"rsh.remote_exec": True}) as gateway:
-    async with gateway.remote_exec(source_or_module_or_function, **kwargs) as channel:
-        ...
+    async with gateway.open(rsh.RemoteExec) as rx:
+        async with rx.run(source_or_module_or_function, **kwargs) as channel:
+            ...
 ```
 
-`remote_exec` is an async context manager yielding a channel connected to
-the code on the worker; leaving the block closes it.
+`rx.run` is an async context manager yielding a channel connected to the
+code on the worker; leaving the block closes it. Each run gets its own
+channel, created by the service and handed to the client over the client's
+channel. The examples below use `rx` for that client.
+
+runsomewhere is not execnet: there is no `gateway.remote_exec` and no
+compatibility layer for execnet's API.
 
 ## What can be sent
 
 ### A source string
 
 ```python
-async with gateway.remote_exec(
+async with rx.run(
     """
     import os
     channel.send(sorted(os.listdir("/var/lib/app")))
@@ -43,7 +51,7 @@ globals. It takes no keyword arguments.
 ```python
 import mypkg.probes.disk
 
-async with gateway.remote_exec(mypkg.probes.disk) as channel:
+async with rx.run(mypkg.probes.disk) as channel:
     ...
 ```
 
@@ -62,7 +70,7 @@ def disk_usage(channel, path):
     channel.send({"total": usage.total, "free": usage.free})
 
 
-async with gateway.remote_exec(disk_usage, path="/") as channel:
+async with rx.run(disk_usage, path="/") as channel:
     print(await channel.receive())
 ```
 

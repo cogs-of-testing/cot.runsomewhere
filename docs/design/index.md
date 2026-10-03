@@ -79,9 +79,8 @@ channels, so a service can hand out further conversations.
 and offers the service's API. Callers use clients; channels are the level
 below.
 
-**Group**: the scope gateways are spawned in. Every `spawn`, `open` and
-`remote_exec` is an async context manager, so each resource closes with its
-own block; the group closes whatever is left, in reverse order of creation,
+**Group**: the scope gateways are spawned in. Every `spawn` and `open` is
+an async context manager, so each resource closes with its own block; the group closes whatever is left, in reverse order of creation,
 on success, error or cancellation alike.
 
 ```python
@@ -193,8 +192,9 @@ API without `await`, plus `timeout=` ([surfaces](surfaces.md)).
 
 ### Poking at a host
 
-Not everything is worth a package. For a one-off question, remote exec sends
-a function, as text, to a worker that has it enabled:
+Not everything is worth a package. For a one-off question, remote exec, a
+concession for ad-hoc work, sends a function, as text, to a worker that has it
+enabled:
 
 ```python
 def listing(channel, path):
@@ -207,8 +207,9 @@ async with rsh.open_group() as group:
     async with group.spawn(
         rsh.Ssh("nas"), services={"rsh.remote_exec": True}
     ) as gateway:
-        async with gateway.remote_exec(listing, path="/var/lib/app") as channel:
-            print(await channel.wait_closed())
+        async with gateway.open(rsh.RemoteExec) as rx:
+            async with rx.run(listing, path="/var/lib/app") as channel:
+                print(await channel.wait_closed())
 ```
 
 ### Diagnostics inside a running container
@@ -252,8 +253,10 @@ plugins may also crash. The isolation is for state, not hostile code.
 - **Values:** `None`, `bool`, `int`, `float`, `complex`, `str`, `bytes`,
   `tuple`, `list`, `dict`, `set`, `frozenset`, and channels.
   `rsh.can_send(x)` checks without sending.
-- **Nothing outlives its group.** No global state, no default group, no atexit
-  hooks.
+- **Nothing outlives its group.** There is no default group. The one
+  process-wide object is the facades' default engine, started lazily and
+  idle between groups; an override is a context variable
+  ([surfaces](surfaces.md)).
 - **Async core, sync facade.** The core API is async and runs in your own trio
   or asyncio loop, with cancellation from your own scope and no `timeout=`.
   Sync code uses a facade over the same core, run in a thread or
@@ -313,12 +316,14 @@ Proposed, not yet settled:
 1. Clients written once, async; `gateway.open(Client)` on the sync facade
    yields a sync wrapper ([services](services.md)).
 2. Copy semantics on threads too, with no `Thread(shared=True)`.
-3. The core written on anyio, so it runs in trio and asyncio callers alike;
-   the thread engine host by default, the subinterpreter one opt-in until
-   measured ([surfaces](surfaces.md)).
+3. The core written on anyio, so it runs in trio and asyncio callers alike
+   ([surfaces](surfaces.md)).
 4. Kubernetes (`kubectl exec -i`) in-tree after ssh and podman, with no public
    transport extension point until an outside transport asks for one.
 5. No greenlet feature until someone asks; a gevent worker profile first if
    they do.
+6. Managed shutdown: how closing escalates, who owns the grace periods, and
+   how the default engine stops
+   ([gateways](gateways-and-channels.md#managed-shutdown-open)).
 
 Each part document marks its own proposals.

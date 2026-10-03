@@ -32,6 +32,10 @@ rsh.Container(name="app-1", runtime="docker")
 - **Places relative to a worker** are the same values handed to
   `gateway.spawn` ([relaying](relaying.md)); `rsh.Process()` spawned through
   the build box's gateway is a process on the build box.
+- **Place kinds are entry points**, in the group `cot.runsomewhere.places`,
+  like services. A place sent to `rsh.via` travels as its entry-point name
+  and its fields, never as an import path. runsomewhere declares its own
+  places; the test harness declares `inloop` the same way.
 
 `rsh.parse_place("ssh=buildbox//python=3.13")` reads the same values from a
 string, for command lines and configuration files.

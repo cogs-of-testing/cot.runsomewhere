@@ -95,11 +95,13 @@ with rsh.sync.open_group() as group:
             print(agent.status())
 ```
 
-The built-in services are reached through clients too, which is why they
-appear as gateway methods rather than `open` calls: `gateway.spawn` is the
+The built-in services are reached through clients too. Those that extend
+what a gateway is for appear as gateway methods: `gateway.spawn` is the
 client of `rsh.via`, `gateway.deploy` of `rsh.deploy` and `rsh.transfer`,
-`gateway.connect` and `gateway.forward` of `rsh.proxy`, `gateway.remote_exec`
-of `rsh.remote_exec`.
+`gateway.connect` and `gateway.forward` of `rsh.proxy`. Remote exec is a
+concession, not part of how a system is built, so it gets no gateway method:
+its client is opened like any other, `gateway.open(rsh.RemoteExec)`
+([remote exec](remote-exec.md)).
 
 ## Built-in services
 

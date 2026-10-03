@@ -68,6 +68,24 @@ inside the group's. Scopes nest, so a worker spawned through another is closed
 before the one it runs through. If a group's scope is cancelled or fails, it
 closes whatever gateways are still open, in reverse order of creation.
 
+### Managed shutdown (open)
+
+The goal: everything that needs exiting exits safely, and nothing is left
+running when its scope ends. How the close escalates is not settled. The
+first implementation has one `close_timeout` per spawn, used for each of up
+to three waits (for EOF, for exit, for exit after terminate) before the kill,
+and shields the graceful close from outside cancellation. Questions to settle:
+
+- Who owns the grace periods: the place, which knows whether its worker can
+  be terminated or killed at all, or the spawn.
+- Whether outside cancellation may shorten a graceful close, and by how much.
+- The order across relays: workers behind a relay close before the relay's
+  own gateway, but a relay that is itself going away has to close them first.
+- What happens to sync handlers that ignore their closed channel, and to
+  in-process places (thread, subinterpreter), which cannot be killed.
+- How the default engine is stopped when the managing process exits, with
+  nothing left to an `atexit` hook.
+
 ### Output
 
 A worker whose protocol runs on its own stream leaves stdio to the code it
@@ -170,6 +188,10 @@ Channel ids are allocated by the side that creates the channel: odd on the
 caller, even on the worker, so both can open without coordination. Payloads
 of data frames are values in a tagged binary encoding; nothing in it can name
 a class or run code on decode.
+
+Names on the wire are entry-point names: services by their service name,
+places (sent to `rsh.via`) by their place name. No frame carries an import
+path.
 
 **Proposed:** the stream starts with 4 magic bytes and a protocol version
 byte, before any frame, so that a worker started on the wrong stream, or an

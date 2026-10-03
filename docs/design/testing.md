@@ -44,6 +44,10 @@ sides are joined by an in-memory byte pipe and speak the full protocol over it:
 handshake, configuration, frames, credits. Nothing is short-circuited, so a
 test at this level exercises the same code a process worker runs.
 
+`rsht.open_inloop(**place_options)` is the short form for a test that needs
+one gateway: it opens a group of its own and spawns an `InLoop` worker in it.
+`enable=` turns services on or off, as `services=` does on `group.spawn`.
+
 ### Services at level 1
 
 - Tests of the **service layer itself** pass handler objects in directly:
