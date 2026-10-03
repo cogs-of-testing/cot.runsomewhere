@@ -79,10 +79,27 @@ to finish: complete its work, send what it owes, and close its channel with a
 result. Closing ends the communication. A shutdown stops first and closes
 what is left.
 
+A stop is sent on one channel, with `channel.stop()` or `client.stop()`. It
+never cancels, drops nothing, and leaves both directions open, so the handler
+can still send what it owes and close with a result. An async handler sees it
+as `channel.stopping` and can wait for it with `await channel.stop_requested()`;
+a sync handler polls `channel.stopping` or waits with
+`channel.wait_stopping(timeout)`. Code sent with [remote exec](remote-exec.md)
+gets the same. A stop carries a deadline, relative so clocks need not agree;
+it is best effort: the worker passes it on and honours it where it can, and
+what enforces it is the caller, which closes the channel when it passes. A
+handler that ignores its stop is closed like any other. A stop for a handler
+that already returned is ignored, since that race is normal.
+
+Either side creates channels: the worker makes them with `channel.new()` and
+sends them back. A gateway's stop is therefore a frame of its own, not only
+a stop per channel: after it, neither side creates channels, and creating one
+raises `StateError`. Every channel open at that point is then stopped.
+
 Every node that shuts down passes through the same phases:
 
-1. **request**: the node is told to stop: a stop for a service, a
-   gateway-close for a worker, a cancellation for a task;
+1. **request**: the node is told to stop: a stop for a channel's service, a
+   gateway stop for a worker, a cancellation for a task;
 2. **drain**: it gets until a deadline to finish by itself, its channels
    drained ([closing](#closing));
 3. **force**: what the place can do to a node that did not finish: terminate
@@ -103,8 +120,8 @@ Three kinds of shutdown cascade differently:
 - **A channel** that closes stops its handler on the far side. An async
   handler waiting on the channel sees the close; one busy elsewhere is
   cancelled. A sync handler sees it on its next channel operation.
-- **A gateway** stops its services, drains and closes their channels, then
-  closes the gateway and has the place force the worker. A group shuts its
+- **A gateway** sends its gateway stop, stops every open channel, drains and
+  closes them, then sends the gateway-close and has the place force the worker. A group shuts its
   gateways down in reverse order of creation. The tunnel channels of
   [relayed](relaying.md) gateways are internals of the gateway, not channels
   a caller opened: they follow the gateway's shutdown, never a channel's. A
@@ -128,9 +145,10 @@ Open:
 - The shutdown policy's name and shape, and where defaults live: per group,
   per engine, or per spawn and open. The first implementation's
   `close_timeout` is renamed with it.
-- How a stop is signalled to a service: per channel, with the gateway-close,
-  or both, and how a sync handler observes it. execnet had no services, so
-  it is no precedent.
+- How a gateway stop races a channel created and sent just before it.
+  HTTP/2's GOAWAY settles the same race by naming the last stream it will
+  serve; channel ids are allocated per side, so the gateway stop could name
+  the last id of each.
 - How the engine host learns that the main thread has exited.
 
 ### Output
@@ -199,25 +217,42 @@ Either side may close either direction, and each close tells the peer:
   `ChannelClosed`.
 - `close()` ends both.
 
-A close carries an optional result or error; the peer sees an error as
-`RemoteError`. When a service's handler returns, its channel closes with the
-return value as the result, which the caller reads with
-`await channel.wait_closed()`.
+Only the full close carries a result or an error; the two half-closes carry
+nothing. The peer sees an error as `RemoteError`. When a service's handler
+returns, its channel closes with the return value as the result, which the
+caller reads with `await channel.wait_closed()`. A handler that ended its
+sending early still closes with its result. A result on a half-close would let
+a handler announce one and go on running, and an error after it would have
+nowhere to go: execnet's `waitclose` returns on the end of sending, and an
+error closing the channel after that is only logged. So `wait_closed()`
+returns when the handler has finished, and a channel stays known to its
+gateway until both directions have ended.
 
 **Drain.** `await channel.drain()` waits until every item sent has been
 taken by the peer. The window already says so: the receiver grants credit
 back as its consumer takes items ([flow control](#flow-control)), so drain
 needs no frame of its own. A drain also happens as part of `aclose()`, and of
 a [shutdown](#shutdown), bounded by its deadline. The sync `close()` does not
-wait, and does not drain.
+wait, and does not drain. Taken is not processed: the peer's code may still
+fail with an item it has taken.
 
-Open:
+**Proposed:** when the peer ends receiving with items not taken, a drain
+raises a `ChannelClosed` that says how many were taken and how many were
+discarded; the peer's end of receiving carries how much it had taken, so no
+other frame is needed. If the peer took everything first, the drain kept its
+promise and returns. The drain in `aclose()` raises it; a drain during a
+shutdown records it. Every precedent tells the sender with an error, never a
+quiet return: TCP with a reset, QUIC with STOP_SENDING answered by
+RESET_STREAM, trio with `BrokenResourceError`.
 
-- Which close carries the result: the end of sending, or only the full
-  close. The close is usually what sends it.
-- What a drain does when the peer ends receiving while it waits: raise
-  `ChannelClosed`, or return what was discarded. To be settled by an
-  experiment against a process worker.
+Open, to be settled by an experiment against a process worker:
+
+- Whether the drain behaves as proposed under a full window, a drain in
+  progress, and a worker killed while draining.
+- A caller that wants only the result, and ends receiving: the handler's
+  next send raises, and the caller gets that back as the error. The
+  alternative is to keep receiving open and let the window stall the
+  handler. This may need a policy.
 
 ### Flow control
 
@@ -241,11 +276,11 @@ been written entirely or not at all.
 
 Every frame is a fixed header and a payload:
 
-| Field   | Size    | Meaning                                                 |
-| ------- | ------- | ------------------------------------------------------- |
-| type    | 1 byte  | hello, config, open, data, credit, close, gateway-close |
-| channel | 4 bytes | channel id; 0 for gateway-level frames                  |
-| length  | 4 bytes | payload length                                          |
+| Field   | Size    | Meaning                                                                                                   |
+| ------- | ------- | --------------------------------------------------------------------------------------------------------- |
+| type    | 1 byte  | hello, config, open, data, credit, close (with the directions it ends), stop, gateway-stop, gateway-close |
+| channel | 4 bytes | channel id; 0 for gateway-level frames                                                                    |
+| length  | 4 bytes | payload length                                                                                            |
 
 The decoder is sans-IO: it takes bytes and yields frames, never reads or
 waits, so every transport and every event loop uses the same one.

@@ -327,8 +327,9 @@ Proposed, not yet settled:
    transport extension point until an outside transport asks for one.
 5. No greenlet feature until someone asks; a gevent worker profile first if
    they do.
-6. Shutdown: the policy's name, shape and defaults; how a stop reaches a
-   service; which close carries a result; and what a drain does when the
-   peer stops receiving ([gateways](gateways-and-channels.md#shutdown)).
+6. Shutdown: the policy's name, shape and defaults; how a gateway stop races
+   a channel created just before it; and, by experiment, what a drain does
+   when the peer stops receiving
+   ([gateways](gateways-and-channels.md#shutdown)).
 
 Each part document marks its own proposals.

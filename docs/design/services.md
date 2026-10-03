@@ -155,8 +155,9 @@ queued without limit.
 Stopping a service asks its handler to finish and close its channel with a
 result; closing the channel ends the call. A gateway's shutdown stops its
 services first and closes what is left
-([shutdown](gateways-and-channels.md#shutdown)); how the stop reaches a
-handler is not settled yet.
+([shutdown](gateways-and-channels.md#shutdown)). A handler learns of a stop
+from `channel.stopping`; one that ignores it is closed when the caller's
+deadline passes.
 
 Closing the channel from the caller, closing the client, or closing the
 gateway ends a call:
