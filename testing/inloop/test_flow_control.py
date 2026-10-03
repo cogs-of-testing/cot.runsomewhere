@@ -2,8 +2,7 @@ import anyio
 import pytest
 
 from cot.runsomewhere._channels import DEFAULT_WINDOW
-
-from .conftest import inloop
+from cot.runsomewhere.testing import open_inloop
 
 pytestmark = pytest.mark.anyio
 
@@ -21,7 +20,7 @@ def counting_producer(sent):
 
 async def test_a_sender_stops_at_the_receivers_window():
     sent = []
-    async with inloop(services={"t.produce": counting_producer(sent)}) as gateway:
+    async with open_inloop(services={"t.produce": counting_producer(sent)}) as gateway:
         async with gateway.open("t.produce"):
             await anyio.wait_all_tasks_blocked()
             # one item may exceed what is left of the window, never more
@@ -30,7 +29,7 @@ async def test_a_sender_stops_at_the_receivers_window():
 
 async def test_receiving_grants_the_sender_more_window():
     sent = []
-    async with inloop(services={"t.produce": counting_producer(sent)}) as gateway:
+    async with open_inloop(services={"t.produce": counting_producer(sent)}) as gateway:
         async with gateway.open("t.produce") as channel:
             await anyio.wait_all_tasks_blocked()
             before = sum(sent)
@@ -41,7 +40,7 @@ async def test_receiving_grants_the_sender_more_window():
 
 
 async def test_an_item_larger_than_the_window_still_arrives():
-    async with inloop() as gateway:
+    async with open_inloop() as gateway:
         async with gateway.open(
             "rsh_test_services.produce", count=1, size=DEFAULT_WINDOW * 3
         ) as channel:
@@ -55,7 +54,7 @@ async def test_a_slow_consumer_on_one_channel_does_not_stall_another():
 
     sent = []
     services = {"t.produce": counting_producer(sent), "t.echo": echo}
-    async with inloop(services=services) as gateway:
+    async with open_inloop(services=services) as gateway:
         async with gateway.open("t.produce"):
             await anyio.wait_all_tasks_blocked()
             async with gateway.open("t.echo") as echo:

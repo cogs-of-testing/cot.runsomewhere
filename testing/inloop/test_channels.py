@@ -3,15 +3,14 @@ import pytest
 
 from cot import runsomewhere as rsh
 from cot.runsomewhere import testing as rsht
-
-from .conftest import inloop
+from cot.runsomewhere.testing import open_inloop
 
 pytestmark = pytest.mark.anyio
 
 
 async def test_items_arrive_in_order_over_a_byte_at_a_time_stream():
     items = [{"index": index, "payload": b"x" * index} for index in range(200)]
-    async with inloop(pipe=rsht.Pipe(max_chunk=1)) as gateway:
+    async with open_inloop(pipe=rsht.Pipe(max_chunk=1)) as gateway:
         async with gateway.open("rsh_test_services.echo") as channel:
             async with anyio.create_task_group() as tg:
 
@@ -74,7 +73,7 @@ async def test_a_channel_sent_over_a_channel_is_usable_on_the_other_side():
         async for item in side:
             await side.send(item * 2)
 
-    async with inloop(services={"t.split": split}) as gateway:
+    async with open_inloop(services={"t.split": split}) as gateway:
         async with gateway.open("t.split") as channel:
             side = await channel.receive()
             await side.send(21)
@@ -82,7 +81,7 @@ async def test_a_channel_sent_over_a_channel_is_usable_on_the_other_side():
 
 
 async def test_a_channel_cannot_travel_over_another_gateway():
-    async with inloop() as first, inloop() as second:
+    async with open_inloop() as first, open_inloop() as second:
         async with first.open("rsh_test_services.echo") as channel:
             async with second.open("rsh_test_services.echo") as other:
                 with pytest.raises(rsh.StateError):
@@ -97,7 +96,7 @@ async def test_leaving_the_open_block_closes_the_channel_for_the_service():
             pass
         closed.set()
 
-    async with inloop(services={"t.watch": watch}) as gateway:
+    async with open_inloop(services={"t.watch": watch}) as gateway:
         async with gateway.open("t.watch"):
             pass
         await closed.wait()

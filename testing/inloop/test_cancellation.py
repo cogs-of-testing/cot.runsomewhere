@@ -2,8 +2,7 @@ import anyio
 import pytest
 
 from cot.runsomewhere import testing as rsht
-
-from .conftest import inloop
+from cot.runsomewhere.testing import open_inloop
 
 pytestmark = pytest.mark.anyio
 
@@ -11,7 +10,7 @@ COUNT = 200
 
 
 async def test_cancelled_receives_lose_no_items():
-    async with inloop(pipe=rsht.Pipe(max_chunk=7)) as gateway:
+    async with open_inloop(pipe=rsht.Pipe(max_chunk=7)) as gateway:
         async with gateway.open(
             "rsh_test_services.produce", count=COUNT, size=1
         ) as channel:
@@ -27,7 +26,7 @@ async def test_cancelled_receives_lose_no_items():
 
 
 async def test_a_cancelled_send_is_all_or_nothing():
-    async with inloop(pipe=rsht.Pipe(max_chunk=3)) as gateway:
+    async with open_inloop(pipe=rsht.Pipe(max_chunk=3)) as gateway:
         async with gateway.open("rsh_test_services.echo") as channel:
             for index in range(20):
                 with anyio.move_on_after(0):
@@ -51,7 +50,7 @@ async def test_cancelling_the_caller_cancels_an_async_handler():
             cancelled.set()
             raise
 
-    async with inloop(services={"t.forever": forever}) as gateway:
+    async with open_inloop(services={"t.forever": forever}) as gateway:
 
         async def hold_open():
             async with gateway.open("t.forever"):

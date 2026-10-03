@@ -3,9 +3,9 @@ import re
 import pytest
 
 from cot import runsomewhere as rsh
+from cot.runsomewhere.testing import open_inloop
 
 from . import remote_exec_module
-from .conftest import inloop
 
 pytestmark = pytest.mark.anyio
 
@@ -37,7 +37,7 @@ async def test_remote_exec_is_refused_where_not_enabled(gateway):
 
 
 async def test_a_source_string_runs_with_channel_bound():
-    async with inloop(enable=ENABLED) as gateway:
+    async with open_inloop(enable=ENABLED) as gateway:
         async with gateway.remote_exec(
             """
             channel.send(channel.receive() + 1)
@@ -48,32 +48,32 @@ async def test_a_source_string_runs_with_channel_bound():
 
 
 async def test_a_module_runs_its_source_with_channel_bound():
-    async with inloop(enable=ENABLED) as gateway:
+    async with open_inloop(enable=ENABLED) as gateway:
         async with gateway.remote_exec(remote_exec_module) as channel:
             assert await channel.receive() == "module ran"
 
 
 async def test_a_function_gets_the_channel_and_keyword_arguments():
-    async with inloop(enable=ENABLED) as gateway:
+    async with open_inloop(enable=ENABLED) as gateway:
         async with gateway.remote_exec(double, value=21) as channel:
             assert await channel.wait_closed() == 42
 
 
 async def test_a_sync_function_uses_the_sync_channel_api():
-    async with inloop(enable=ENABLED) as gateway:
+    async with open_inloop(enable=ENABLED) as gateway:
         async with gateway.remote_exec(echo_items) as channel:
             await channel.send("x")
             assert await channel.receive() == "x"
 
 
 async def test_an_async_function_runs_on_the_workers_loop():
-    async with inloop(enable=ENABLED) as gateway:
+    async with open_inloop(enable=ENABLED) as gateway:
         async with gateway.remote_exec(async_double, value=2) as channel:
             assert await channel.wait_closed() == 4
 
 
 async def test_errors_name_the_sent_code_in_the_remote_traceback():
-    async with inloop(enable=ENABLED) as gateway:
+    async with open_inloop(enable=ENABLED) as gateway:
         async with gateway.remote_exec(raises) as channel:
             with pytest.raises(rsh.RemoteError) as excinfo:
                 await channel.wait_closed()
@@ -121,7 +121,7 @@ def wrong_first_parameter(chan):
     ],
 )
 async def test_unrunnable_code_is_refused_before_sending(code, kwargs, error, message):
-    async with inloop(enable=ENABLED) as gateway:
+    async with open_inloop(enable=ENABLED) as gateway:
         with pytest.raises(error, match=message):
             async with gateway.remote_exec(code, **kwargs):
                 pass

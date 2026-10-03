@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import anyio
 import anyio.abc
 
+from .._gateway import Gateway, Group
 from .._places import Launched, Place
 from .._version import version as __version__
 from .._worker import WorkerCore
 from ._pipe import Pipe
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
 
 
 @dataclass
@@ -64,3 +66,19 @@ class InLoop(Place):
             await done.wait()
 
         return Launched(pipe.caller_end, close)
+
+
+@asynccontextmanager
+async def open_inloop(
+    *, enable: Mapping[str, bool] | None = None, **place_options: Any
+) -> AsyncIterator[Gateway]:
+    """A gateway to an :class:`InLoop` worker, in a group of its own.
+
+    ``enable`` turns services on or off, as ``services=`` does on
+    ``group.spawn``; ``place_options`` go to :class:`InLoop`.
+    """
+    async with (
+        Group() as group,
+        group.spawn(InLoop(**place_options), services=dict(enable or {})) as gateway,
+    ):
+        yield gateway

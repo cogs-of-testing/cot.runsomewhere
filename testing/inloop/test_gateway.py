@@ -5,8 +5,7 @@ import pytest
 
 from cot import runsomewhere as rsh
 from cot.runsomewhere import testing as rsht
-
-from .conftest import inloop
+from cot.runsomewhere.testing import open_inloop
 
 pytestmark = pytest.mark.anyio
 
@@ -29,25 +28,25 @@ async def test_remote_exec_and_proxy_are_off_by_default(gateway):
 
 
 async def test_caller_enables_off_by_default_services_at_spawn():
-    async with inloop(enable={"rsh.remote_exec": True}) as gateway:
+    async with open_inloop(enable={"rsh.remote_exec": True}) as gateway:
         assert "rsh.remote_exec" in gateway.services
 
 
 async def test_caller_disables_a_declared_service_at_spawn():
-    async with inloop(enable={"rsh_test_services.echo": False}) as gateway:
+    async with open_inloop(enable={"rsh_test_services.echo": False}) as gateway:
         assert "rsh_test_services.echo" not in gateway.services
 
 
 async def test_version_skew_refuses_the_spawn_naming_both_versions():
     with pytest.raises(rsh.HandshakeRefused) as excinfo:
-        async with inloop(worker_version="99.0.0"):
+        async with open_inloop(worker_version="99.0.0"):
             pytest.fail("a skewed worker must not yield a gateway")
     assert "99.0.0" in str(excinfo.value)
     assert rsh.__version__ in str(excinfo.value)
 
 
 async def test_leaving_the_spawn_block_closes_the_gateway():
-    async with inloop() as gateway:
+    async with open_inloop() as gateway:
         pass
     with pytest.raises(rsh.StateError):
         async with gateway.open("rsh_test_services.echo"):
@@ -63,7 +62,7 @@ async def test_leaving_the_spawn_block_stops_running_services():
         finally:
             stopped.set()
 
-    async with inloop(services={"t.forever": forever}) as gateway:
+    async with open_inloop(services={"t.forever": forever}) as gateway:
         async with gateway.open("t.forever"):
             await anyio.wait_all_tasks_blocked()
     assert stopped.is_set()
@@ -71,7 +70,7 @@ async def test_leaving_the_spawn_block_stops_running_services():
 
 async def test_a_cut_stream_fails_open_channels_with_worker_gone():
     pipe = rsht.Pipe()
-    async with inloop(pipe=pipe) as gateway:
+    async with open_inloop(pipe=pipe) as gateway:
         async with gateway.open("rsh_test_services.echo") as channel:
             pipe.cut()
             with pytest.raises(rsh.WorkerGone):
@@ -86,7 +85,7 @@ async def test_worker_gone_is_a_connection_error():
 
 async def test_a_gone_gateway_refuses_new_channels():
     pipe = rsht.Pipe()
-    async with inloop(pipe=pipe) as gateway:
+    async with open_inloop(pipe=pipe) as gateway:
         pipe.cut()
         await anyio.wait_all_tasks_blocked()
         with pytest.raises(rsh.WorkerGone):
@@ -96,7 +95,7 @@ async def test_a_gone_gateway_refuses_new_channels():
 
 async def test_corrupt_bytes_from_the_worker_end_the_gateway():
     pipe = rsht.Pipe()
-    async with inloop(pipe=pipe) as gateway:
+    async with open_inloop(pipe=pipe) as gateway:
         async with gateway.open("rsh_test_services.echo") as channel:
             pipe.inject(b"\xff" * 16, to="caller")
             with pytest.raises(rsh.WorkerGone, match="frame"):

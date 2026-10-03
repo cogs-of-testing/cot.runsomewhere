@@ -3,7 +3,7 @@
 ``from cot.runsomewhere import testing as rsht``
 """
 
-from ._inloop import InLoop
+from ._inloop import InLoop, open_inloop
 from ._pipe import Pipe
 
-__all__ = ["InLoop", "Pipe"]
+__all__ = ["InLoop", "Pipe", "open_inloop"]
