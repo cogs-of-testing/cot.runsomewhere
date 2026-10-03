@@ -16,6 +16,15 @@ class ChannelClosed(OSError):
     """The channel was closed."""
 
 
+class ItemsDiscarded(ChannelClosed):
+    """The peer stopped receiving before it took every item sent."""
+
+    def __init__(self, message: str, *, taken: int, discarded: int) -> None:
+        super().__init__(message)
+        self.taken = taken
+        self.discarded = discarded
+
+
 class WorkerGone(OSError):
     """The worker, or the link to it, is gone."""
 

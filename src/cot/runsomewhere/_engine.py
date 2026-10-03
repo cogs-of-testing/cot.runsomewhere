@@ -9,7 +9,6 @@ no object is shared between interpreters.
 
 from __future__ import annotations
 
-import atexit
 import importlib
 import itertools
 import queue
@@ -218,6 +217,19 @@ class HostServer:
     async def op_send(self, channel: int, value: Any) -> None:
         await self._objects[channel].send(value)
 
+    async def op_drain(self, channel: int, timeout: float | None) -> None:
+        with anyio.fail_after(timeout):
+            await self._objects[channel].drain()
+
+    async def op_stop(self, channel: int, deadline: float | None) -> None:
+        self._objects[channel].stop(deadline)
+
+    async def op_close_send(self, channel: int) -> None:
+        self._objects[channel].close_send()
+
+    async def op_close_receive(self, channel: int) -> None:
+        self._objects[channel].close_receive()
+
     async def op_receive(self, channel: int, timeout: float | None) -> Any:
         with anyio.fail_after(timeout):
             return await self._objects[channel].receive()
@@ -235,6 +247,7 @@ _ERRORS: dict[str, type[Exception]] = {
         "WorkerGone",
         "HostNotFound",
         "HandshakeRefused",
+        "ItemsDiscarded",
         "StateError",
     ]
 }
@@ -253,15 +266,25 @@ _ERRORS.update(
 )
 
 
-def _error_value(error: Exception) -> tuple[str, str, str]:
-    return (type(error).__name__, str(error), getattr(error, "remote_traceback", ""))
+def _error_value(error: Exception) -> tuple[str, str, str, dict[str, int]]:
+    counts = {}
+    if isinstance(error, _errors.ItemsDiscarded):
+        counts = {"taken": error.taken, "discarded": error.discarded}
+    return (
+        type(error).__name__,
+        str(error),
+        getattr(error, "remote_traceback", ""),
+        counts,
+    )
 
 
-def _raise_error(value: tuple[str, str, str]) -> None:
-    name, message, remote_traceback = value
+def _raise_error(value: tuple[str, str, str, dict[str, int]]) -> None:
+    name, message, remote_traceback, counts = value
     kind = _ERRORS.get(name, RuntimeError)
     if kind is _errors.RemoteError:
         raise _errors.RemoteError(message, remote_traceback=remote_traceback)
+    if kind is _errors.ItemsDiscarded:
+        raise _errors.ItemsDiscarded(message, **counts)
     raise kind(message)
 
 
@@ -322,7 +345,16 @@ class Host:
         threading.Thread(
             target=self._dispatch, name=f"rsh-{kind}-replies", daemon=True
         ).start()
-        atexit.register(self.shutdown)
+        threading.Thread(
+            target=self._stop_after_main, name=f"rsh-{kind}-watch", daemon=True
+        ).start()
+
+    def _stop_after_main(self) -> None:
+        # at interpreter shutdown the main thread counts as finished before
+        # non-daemon threads are joined, so this wakes while the host, which
+        # is one, still runs; groups left open close as cancelled
+        threading.main_thread().join()
+        self.shutdown()
 
     def _start_thread_host(self) -> None:
         requests: queue.Queue[Message | None] = queue.Queue()
@@ -332,7 +364,7 @@ class Host:
             target=anyio.run,
             args=(HostServer().serve, requests.get, responses.put),
             name="rsh-thread-engine",
-            daemon=True,
+            daemon=False,
         )
         self._thread.start()
 
@@ -352,12 +384,20 @@ class Host:
         self._put = put
         self._get = lambda: tuple(decode(responses.get()))
         self._thread = threading.Thread(
-            target=self._interpreter.call,
-            args=(_subinterpreter_main, requests, responses),
+            target=self._run_subinterpreter,
+            args=(requests, responses),
             name="rsh-subinterpreter-engine",
-            daemon=True,
+            daemon=False,
         )
         self._thread.start()
+
+    def _run_subinterpreter(self, requests: Any, responses: Any) -> None:
+        # closed by this thread, which interpreter shutdown waits for, not by
+        # the watcher, which it does not
+        try:
+            self._interpreter.call(_subinterpreter_main, requests, responses)
+        finally:
+            self._interpreter.close()
 
     @property
     def thread_id(self) -> int | None:
@@ -411,10 +451,11 @@ class Host:
             raise StateError(msg) from None
 
     def shutdown(self) -> None:
+        """Close the groups still open, as cancelled, and stop the host."""
+        if not self._thread.is_alive():
+            return
         self._put(None)
-        self._thread.join(timeout=5)
-        if self.kind == "subinterpreter" and not self._thread.is_alive():
-            self._interpreter.close()
+        self._thread.join()
 
 
 # -- the async facade ---------------------------------------------------------
@@ -497,6 +538,20 @@ class AsyncHostedChannel:
 
     async def receive(self) -> Any:
         return await self._engine.acall("receive", self._handle, None)
+
+    # sync in the async API too: queued behind everything sent before, and not
+    # waited for, so the caller's loop never blocks on the host
+    async def drain(self) -> None:
+        await self._engine.acall("drain", self._handle, None)
+
+    def stop(self, deadline: float | None = None) -> None:
+        self._engine.submit("stop", self._handle, deadline)
+
+    def close_send(self) -> None:
+        self._engine.submit("close_send", self._handle)
+
+    def close_receive(self) -> None:
+        self._engine.submit("close_receive", self._handle)
 
     async def wait_closed(self) -> Any:
         return await self._engine.acall("wait_closed", self._handle, None)

@@ -47,3 +47,38 @@ async def test_cancellation_crosses_into_the_host(engine):
 async def test_without_an_override_the_async_api_runs_in_the_callers_loop():
     async with rsh.open_group() as group:
         assert isinstance(group, rsh.Group)
+
+
+async def test_ending_sending_through_an_engine_host_leaves_the_result(engine):
+    with rsh.use_engine(engine):
+        async with rsh.open_group() as group:
+            async with group.spawn(rsht.InLoop()) as gateway:
+                async with gateway.open("rsh_test_services.add") as channel:
+                    for number in [1, 2, 3]:
+                        await channel.send(number)
+                    channel.close_send()
+                    with anyio.fail_after(5):
+                        assert await channel.wait_closed() == 6
+
+
+async def test_drain_through_an_engine_host_returns_once_taken(engine):
+    with rsh.use_engine(engine):
+        async with rsh.open_group() as group:
+            async with group.spawn(rsht.InLoop()) as gateway:
+                async with gateway.open("rsh_test_services.take", count=3) as channel:
+                    for number in range(3):
+                        await channel.send(number)
+                    with anyio.fail_after(5):
+                        await channel.drain()
+                        assert await channel.wait_closed() == [0, 1, 2]
+
+
+async def test_stop_through_an_engine_host(engine):
+    with rsh.use_engine(engine):
+        async with rsh.open_group() as group:
+            async with group.spawn(rsht.InLoop()) as gateway:
+                async with gateway.open("rsh_test_services.until_stopped") as channel:
+                    channel.stop()
+                    with anyio.fail_after(5):
+                        assert await channel.receive() == "bye"
+                        assert await channel.wait_closed() == "stopped"

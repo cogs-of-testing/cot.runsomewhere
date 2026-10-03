@@ -26,6 +26,8 @@ class FrameType(enum.IntEnum):
     CREDIT = 5
     CLOSE = 6
     GATEWAY_CLOSE = 7
+    STOP = 8
+    GATEWAY_STOP = 9
 
 
 class Frame(NamedTuple):
