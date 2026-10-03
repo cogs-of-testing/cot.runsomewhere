@@ -1,3 +1,5 @@
+import contextlib
+
 import anyio
 import pytest
 
@@ -80,6 +82,7 @@ async def test_a_channel_sent_over_a_channel_is_usable_on_the_other_side():
             side = await channel.receive()
             await side.send(21)
             assert await side.receive() == 42
+            await side.aclose()
 
 
 async def test_a_channel_cannot_travel_over_another_gateway():
@@ -347,3 +350,55 @@ async def test_a_client_stops_its_service():
             client.stop()
             with anyio.fail_after(1):
                 assert await client.channel.wait_closed() == "stopped"
+
+
+async def test_a_channel_left_open_is_stopped_and_reported_when_its_gateway_shuts_down():
+    async def split(channel):
+        side = channel.new()
+        await channel.send(side)
+        await side.stop_requested()
+        return "stopped"
+
+    async def leave_it_open():
+        async with rsh.open_group() as group:
+            place = rsht.InLoop(services={"t.split": split})
+            async with (
+                group.spawn(place, close_timeout=0.4) as gateway,
+                gateway.open("t.split") as channel,
+            ):
+                return await channel.receive()
+
+    with pytest.warns(ResourceWarning, match="still open"):
+        side = await leave_it_open()
+    with pytest.raises(rsh.ChannelClosed):
+        await side.send(1)
+
+
+async def test_no_channel_is_created_once_the_gateway_is_stopping():
+    refused = []
+
+    async def late(channel):
+        side = channel.new()
+        await channel.send(side)
+        # waiting on its own channel, the handler sees the caller leave rather
+        # than being cancelled
+        with contextlib.suppress(rsh.ChannelClosed):
+            await channel.receive()
+        await side.stop_requested()
+        try:
+            side.new()
+        except rsh.StateError:
+            refused.append(True)
+
+    async def leave_it_open():
+        async with rsh.open_group() as group:
+            place = rsht.InLoop(services={"t.late": late})
+            async with (
+                group.spawn(place, close_timeout=0.4) as gateway,
+                gateway.open("t.late") as channel,
+            ):
+                await channel.receive()
+
+    with pytest.warns(ResourceWarning, match="still open"):
+        await leave_it_open()
+    assert refused == [True]

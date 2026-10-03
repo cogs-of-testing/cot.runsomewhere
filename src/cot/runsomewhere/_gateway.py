@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
 
@@ -221,6 +222,33 @@ class _Open(Generic[OpenedT]):
         await self._channel.aclose()
 
 
+async def _stop_left_open(connection: Connection, until: float) -> None:
+    """The stop phase of a gateway's shutdown: no new channels from either
+    side, and every channel still open is stopped and drained."""
+    connection.stopping = True
+    connection.send_frame(FrameType.GATEWAY_STOP, 0)
+    left_open = connection.channels()
+    for channel in left_open:
+        channel.stop(deadline=max(0.0, until - anyio.current_time()))
+    outcomes = dict.fromkeys(left_open, "")
+    with anyio.move_on_at(until):
+        for channel in left_open:
+            try:
+                await channel.drain()
+            except OSError as error:
+                # a drain during a shutdown records what went wrong, and the
+                # shutdown goes on
+                outcomes[channel] = f": {error}"
+            with contextlib.suppress(OSError, RemoteError):
+                await channel.wait_closed()
+    for channel, outcome in outcomes.items():
+        warnings.warn(
+            f"{channel!r} was still open when its gateway shut down{outcome}",
+            ResourceWarning,
+            stacklevel=1,
+        )
+
+
 def _accepted(answer: dict[str, Any]) -> dict[str, Any]:
     """The worker's answer to the configuration, unless it refused."""
     if not answer["ok"]:
@@ -293,23 +321,31 @@ class _Spawn:
             self._connection_done.set()
 
     async def _close(self, *, graceful: bool) -> None:
-        """Ask the worker to exit, wait for it until the deadline, then have the
-        place force it. A cancelled scope goes straight to force."""
+        """Stop what is still open, ask the worker to exit, wait for it until
+        the deadline, then have the place force it. A cancelled scope goes
+        straight to force."""
         if self._gateway is not None:
             self._gateway._closed = True
         connection = self._connection
-        if graceful and connection is not None and connection.failure is None:
-            connection.send_frame(
-                FrameType.GATEWAY_CLOSE, 0, encode({"deadline": self._close_timeout})
-            )
-        else:
+        healthy = graceful and connection is not None and connection.failure is None
+        if not healthy:
             # without a gateway-close, the end of the stream is what tells the
             # worker to go
             self._connection_scope.cancel()
+        start = anyio.current_time()
+        end = start + self._close_timeout
         exited = False
         try:
             await checkpoint_if_cancelled()
-            with anyio.move_on_after(self._close_timeout):
+            with anyio.move_on_at(end):
+                if healthy:
+                    assert connection is not None
+                    # until a shutdown policy splits it, stopping gets half
+                    await _stop_left_open(connection, start + self._close_timeout / 2)
+                    remaining = max(0.0, end - anyio.current_time())
+                    connection.send_frame(
+                        FrameType.GATEWAY_CLOSE, 0, encode({"deadline": remaining})
+                    )
                 if connection is not None:
                     await connection.gone.wait()
                 if self._launched is not None:
