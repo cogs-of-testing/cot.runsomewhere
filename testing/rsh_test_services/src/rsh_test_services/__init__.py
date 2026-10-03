@@ -6,6 +6,8 @@ import os
 import sys
 import time
 
+import anyio
+
 from cot import runsomewhere as rsh
 
 
@@ -34,6 +36,12 @@ async def ask(channel, *, question):
     await channel.send(question)
     channel.close_send()
     return await channel.receive()
+
+
+async def take(channel, *, count, delay=0):
+    # the delay lets a caller finish sending before items go missing
+    await anyio.sleep(delay)
+    return [await channel.receive() for _ in range(count)]
 
 
 async def fail(channel, *, message):

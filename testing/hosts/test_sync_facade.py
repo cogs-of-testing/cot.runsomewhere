@@ -102,3 +102,17 @@ def test_ending_sending_through_the_sync_facade_leaves_the_result(engine):
                         channel.send(number)
                     channel.close_send()
                     assert channel.wait_closed(timeout=5) == 6
+
+
+def test_drain_through_the_sync_facade_carries_the_counts(engine):
+    with rsh.use_engine(engine):
+        with rsh.sync.open_group() as group:
+            with group.spawn(rsht.InLoop()) as gateway:
+                with gateway.open(
+                    "rsh_test_services.take", count=1, delay=0.3
+                ) as channel:
+                    for number in range(3):
+                        channel.send(number)
+                    with pytest.raises(rsh.ItemsDiscarded) as excinfo:
+                        channel.drain(timeout=5)
+                    assert (excinfo.value.taken, excinfo.value.discarded) == (1, 2)

@@ -237,8 +237,8 @@ wait, and does not drain. Taken is not processed: the peer's code may still
 fail with an item it has taken.
 
 **Proposed:** when the peer ends receiving with items not taken, a drain
-raises a `ChannelClosed` that says how many were taken and how many were
-discarded; the peer's end of receiving carries how much it had taken, so no
+raises `ItemsDiscarded`, a `ChannelClosed` that says how many were taken and
+how many were discarded; the peer's end of receiving carries how much it had taken, so no
 other frame is needed. If the peer took everything first, the drain kept its
 promise and returns. The drain in `aclose()` raises it; a drain during a
 shutdown records it. Every precedent tells the sender with an error, never a
@@ -301,12 +301,13 @@ message instead of a garbled frame.
 
 ## Errors
 
-| Situation                                                         | Error                                                   |
-| ----------------------------------------------------------------- | ------------------------------------------------------- |
-| The far side raised, or closed with an error                      | `RemoteError`, with the remote traceback as text        |
-| The channel was closed                                            | `ChannelClosed` (an `OSError`)                          |
-| The worker or the link is gone                                    | `WorkerGone` (an `OSError`)                             |
-| A place could not be reached at all                               | `HostNotFound` (an `OSError`)                           |
-| The other side's protocol or runsomewhere version is incompatible | `HandshakeRefused` (an `OSError`), naming both versions |
-| Wrong use: closed channel, foreign gateway, unknown service       | `StateError`                                            |
-| A sync-facade timeout                                             | builtin `TimeoutError`                                  |
+| Situation                                                         | Error                                                              |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| The far side raised, or closed with an error                      | `RemoteError`, with the remote traceback as text                   |
+| The channel was closed                                            | `ChannelClosed` (an `OSError`)                                     |
+| A drain ended with items the peer never took                      | `ItemsDiscarded` (a `ChannelClosed`), with `taken` and `discarded` |
+| The worker or the link is gone                                    | `WorkerGone` (an `OSError`)                                        |
+| A place could not be reached at all                               | `HostNotFound` (an `OSError`)                                      |
+| The other side's protocol or runsomewhere version is incompatible | `HandshakeRefused` (an `OSError`), naming both versions            |
+| Wrong use: closed channel, foreign gateway, unknown service       | `StateError`                                                       |
+| A sync-facade timeout                                             | builtin `TimeoutError`                                             |

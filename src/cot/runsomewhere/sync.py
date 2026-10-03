@@ -138,6 +138,9 @@ class Channel:
     def wait_closed(self, timeout: float | None = None) -> Any:
         return self._engine.call("wait_closed", self._handle, timeout)
 
+    def drain(self, timeout: float | None = None) -> None:
+        self._engine.call("drain", self._handle, timeout)
+
     def close_send(self) -> None:
         self._engine.call("close_send", self._handle)
 
@@ -167,6 +170,9 @@ class _NonSuspending:
 
     async def wait_closed(self) -> Any:
         return self._channel.wait_closed()
+
+    async def drain(self) -> None:
+        self._channel.drain()
 
     def close_send(self) -> None:
         self._channel.close_send()

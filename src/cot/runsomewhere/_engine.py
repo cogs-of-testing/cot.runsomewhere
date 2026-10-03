@@ -218,6 +218,10 @@ class HostServer:
     async def op_send(self, channel: int, value: Any) -> None:
         await self._objects[channel].send(value)
 
+    async def op_drain(self, channel: int, timeout: float | None) -> None:
+        with anyio.fail_after(timeout):
+            await self._objects[channel].drain()
+
     async def op_close_send(self, channel: int) -> None:
         self._objects[channel].close_send()
 
@@ -241,6 +245,7 @@ _ERRORS: dict[str, type[Exception]] = {
         "WorkerGone",
         "HostNotFound",
         "HandshakeRefused",
+        "ItemsDiscarded",
         "StateError",
     ]
 }
@@ -259,15 +264,25 @@ _ERRORS.update(
 )
 
 
-def _error_value(error: Exception) -> tuple[str, str, str]:
-    return (type(error).__name__, str(error), getattr(error, "remote_traceback", ""))
+def _error_value(error: Exception) -> tuple[str, str, str, dict[str, int]]:
+    counts = {}
+    if isinstance(error, _errors.ItemsDiscarded):
+        counts = {"taken": error.taken, "discarded": error.discarded}
+    return (
+        type(error).__name__,
+        str(error),
+        getattr(error, "remote_traceback", ""),
+        counts,
+    )
 
 
-def _raise_error(value: tuple[str, str, str]) -> None:
-    name, message, remote_traceback = value
+def _raise_error(value: tuple[str, str, str, dict[str, int]]) -> None:
+    name, message, remote_traceback, counts = value
     kind = _ERRORS.get(name, RuntimeError)
     if kind is _errors.RemoteError:
         raise _errors.RemoteError(message, remote_traceback=remote_traceback)
+    if kind is _errors.ItemsDiscarded:
+        raise _errors.ItemsDiscarded(message, **counts)
     raise kind(message)
 
 
@@ -506,6 +521,9 @@ class AsyncHostedChannel:
 
     # sync in the async API too: queued behind everything sent before, and not
     # waited for, so the caller's loop never blocks on the host
+    async def drain(self) -> None:
+        await self._engine.acall("drain", self._handle, None)
+
     def close_send(self) -> None:
         self._engine.submit("close_send", self._handle)
 

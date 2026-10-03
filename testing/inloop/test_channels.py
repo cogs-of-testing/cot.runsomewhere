@@ -230,3 +230,66 @@ async def test_ending_both_directions_is_a_full_close(gateway):
         channel.close_receive()
         with pytest.raises(rsh.ChannelClosed, match="this side"):
             await channel.wait_closed()
+
+
+async def test_drain_returns_once_the_peer_has_taken_every_item():
+    may_take = anyio.Event()
+
+    async def slow(channel):
+        await may_take.wait()
+        return [item async for item in channel]
+
+    async with open_inloop(services={"t.slow": slow}) as gateway:
+        async with gateway.open("t.slow") as channel:
+            for number in [1, 2, 3]:
+                await channel.send(number)
+            with anyio.move_on_after(0.05) as waited:
+                await channel.drain()
+            assert waited.cancelled_caught
+            may_take.set()
+            with anyio.fail_after(1):
+                await channel.drain()
+            channel.close_send()
+            assert await channel.wait_closed() == [1, 2, 3]
+
+
+async def test_drain_with_nothing_sent_returns_at_once(gateway):
+    async with gateway.open("rsh_test_services.add") as channel:
+        with anyio.fail_after(1):
+            await channel.drain()
+
+
+async def test_drain_counts_what_a_peer_that_stopped_receiving_discarded():
+    async def take_one(channel):
+        await channel.receive()
+        channel.close_receive()
+        return "enough"
+
+    async with open_inloop(services={"t.take_one": take_one}) as gateway:
+        async with gateway.open("t.take_one") as channel:
+            for number in [1, 2, 3]:
+                await channel.send(number)
+            with anyio.fail_after(1), pytest.raises(rsh.ItemsDiscarded) as excinfo:
+                await channel.drain()
+            assert (excinfo.value.taken, excinfo.value.discarded) == (1, 2)
+            assert await channel.wait_closed() == "enough"
+
+
+async def test_drain_counts_what_a_handler_that_returned_early_left(gateway):
+    async with gateway.open("rsh_test_services.take", count=2) as channel:
+        for number in range(5):
+            await channel.send(number)
+        with anyio.fail_after(1), pytest.raises(rsh.ItemsDiscarded) as excinfo:
+            await channel.drain()
+        assert (excinfo.value.taken, excinfo.value.discarded) == (2, 3)
+
+
+async def test_drain_raises_worker_gone_when_the_link_is_cut():
+    pipe = rsht.Pipe()
+    async with open_inloop(pipe=pipe) as gateway:
+        async with gateway.open("rsh_test_services.take", count=0) as channel:
+            pipe.hold()
+            await channel.send(1)
+            pipe.cut()
+            with anyio.fail_after(1), pytest.raises(rsh.WorkerGone):
+                await channel.drain()

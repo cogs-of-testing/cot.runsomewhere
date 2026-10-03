@@ -14,7 +14,7 @@ import anyio
 import anyio.abc
 from anyio.lowlevel import cancel_shielded_checkpoint, checkpoint_if_cancelled
 
-from ._errors import ChannelClosed, RemoteError, StateError, WorkerGone
+from ._errors import ChannelClosed, ItemsDiscarded, RemoteError, StateError, WorkerGone
 from ._frames import PREAMBLE, Frame, FrameDecoder, FrameError, FrameType, encode_frame
 from ._values import DecodeError, decode, encode
 
@@ -37,6 +37,12 @@ class Channel:
         self._credit = DEFAULT_WINDOW
         self._credit_arrived: anyio.Event | None = None
         self._unacknowledged = 0
+        #: sizes of the items sent and not yet taken, oldest first
+        self._outstanding: deque[int] = deque()
+        self._granted_unmatched = 0
+        self._taken_by_peer = 0
+        self._granted_total = 0
+        self._taken_bytes = 0
         self._closed_locally = False
         self._ended_sending = False
         self._ended_receiving = False
@@ -65,12 +71,39 @@ class Channel:
         self._raise_if_unusable()
         payload = encode(value, self._connection.channel_id)
         while self._credit <= 0:
-            self._credit_arrived = anyio.Event()
-            await self._credit_arrived.wait()
+            await self._wait_for_credit()
             self._raise_if_unusable()
         self._credit -= len(payload)
+        self._outstanding.append(len(payload))
         self._connection.send_frame(FrameType.DATA, self.id, payload)
         await cancel_shielded_checkpoint()
+
+    async def drain(self) -> None:
+        """Wait until the peer has taken every item sent.
+
+        Taken is not processed: the peer's code may still fail with an item it
+        took. Raises `ItemsDiscarded` when the peer stopped receiving first.
+        """
+        await checkpoint_if_cancelled()
+        while self._outstanding:
+            if self._peer_ended_receiving:
+                msg = (
+                    f"{self!r}: the other side took {self._taken_by_peer} items "
+                    f"and discarded {len(self._outstanding)}"
+                )
+                raise ItemsDiscarded(
+                    msg, taken=self._taken_by_peer, discarded=len(self._outstanding)
+                )
+            if self._failure is not None:
+                raise self._failure
+            await self._wait_for_credit()
+
+    async def _wait_for_credit(self) -> None:
+        # shared by a blocked send and a drain: replacing an unset event would
+        # leave the other waiting on one nobody sets
+        if self._credit_arrived is None or self._credit_arrived.is_set():
+            self._credit_arrived = anyio.Event()
+        await self._credit_arrived.wait()
 
     async def receive(self) -> Any:
         # a cancellation is taken either before an item is removed or not at
@@ -88,6 +121,7 @@ class Channel:
             finally:
                 self._receivers_waiting -= 1
         value, size = self._items.popleft()
+        self._taken_bytes += size
         self._consumed(size)
         await cancel_shielded_checkpoint()
         return value
@@ -140,10 +174,10 @@ class Channel:
             self._ended_receiving = True
             self._items.clear()
         if self._peer_close is None and self._failure is None:
-            ends = "send" if send else "receive"
-            self._connection.send_frame(
-                FrameType.CLOSE, self.id, encode({"ends": ends})
-            )
+            info: dict[str, Any] = {"ends": "send"}
+            if not send:
+                info = {"ends": "receive", "taken": self._taken_bytes}
+            self._connection.send_frame(FrameType.CLOSE, self.id, encode(info))
         self._wake()
 
     def close(
@@ -168,6 +202,7 @@ class Channel:
                     info = _error_info(unsendable)
                 else:
                     info = {"result": result}
+            info["taken"] = self._taken_bytes
             self._connection.send_frame(
                 FrameType.CLOSE, self.id, encode(info, self._connection.channel_id)
             )
@@ -185,11 +220,23 @@ class Channel:
 
     def _grant(self, amount: int) -> None:
         self._credit += amount
+        self._match_taken(amount)
         if self._credit_arrived is not None:
             self._credit_arrived.set()
 
+    def _match_taken(self, amount: int) -> None:
+        # the peer takes items in order, so bytes taken map to whole items
+        self._granted_total += amount
+        self._granted_unmatched += amount
+        while self._outstanding and self._granted_unmatched >= self._outstanding[0]:
+            self._granted_unmatched -= self._outstanding.popleft()
+            self._taken_by_peer += 1
+
     def _closed_by_peer(self, info: dict[str, Any]) -> None:
         ends = info.pop("ends", None)
+        # taken but not yet granted back, since credit goes out in batches
+        taken = info.pop("taken", self._granted_total)
+        self._match_taken(max(0, taken - self._granted_total))
         self._peer_ended_sending |= ends in (None, "send")
         self._peer_ended_receiving |= ends in (None, "receive")
         if ends is not None:

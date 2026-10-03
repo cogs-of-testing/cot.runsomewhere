@@ -17,6 +17,7 @@ dependencies = []
 "rsh_test_services.add" = "rsh_test_services:add"
 "rsh_test_services.sync_add" = "rsh_test_services:sync_add"
 "rsh_test_services.ask" = "rsh_test_services:ask"
+"rsh_test_services.take" = "rsh_test_services:take"
 "rsh_test_services.fail" = "rsh_test_services:fail"
 "rsh_test_services.produce" = "rsh_test_services:produce"
 "rsh_test_services.env" = "rsh_test_services:env"

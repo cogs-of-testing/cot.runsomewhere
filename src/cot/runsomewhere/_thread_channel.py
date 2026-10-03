@@ -57,6 +57,15 @@ class ThreadChannel:
 
         return anyio.from_thread.run(wait)
 
+    def drain(self, timeout: float | None = None) -> None:
+        self._raise_if_detached()
+
+        async def drain() -> None:
+            with anyio.fail_after(timeout):
+                await self.async_channel.drain()
+
+        anyio.from_thread.run(drain)
+
     def new(self) -> ThreadChannel:
         return ThreadChannel(self.async_channel.new())
 
