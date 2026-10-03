@@ -3,6 +3,8 @@ import pytest
 
 from cot import runsomewhere as rsh
 from cot.runsomewhere import testing as rsht
+from cot.runsomewhere._frames import Frame, FrameType, encode_frame
+from cot.runsomewhere._values import encode
 from cot.runsomewhere.testing import open_inloop
 
 pytestmark = pytest.mark.anyio
@@ -105,3 +107,61 @@ async def test_leaving_the_open_block_closes_the_channel_for_the_service():
 async def test_open_is_only_a_context_manager(gateway):
     with pytest.raises(TypeError):
         await gateway.open("rsh_test_services.echo")
+
+
+def _half_close_from_caller(pipe, channel, ends):
+    # no public half-close yet: the frame a caller would send, put on the wire
+    frame = Frame(FrameType.CLOSE, channel.id, encode({"ends": ends}))
+    pipe.inject(encode_frame(frame), to="worker")
+
+
+async def test_the_result_still_arrives_after_the_caller_ends_its_sending():
+    async def add(channel):
+        return sum([item async for item in channel])
+
+    pipe = rsht.Pipe()
+    async with open_inloop(pipe=pipe, services={"t.add": add}) as gateway:
+        async with gateway.open("t.add") as channel:
+            for number in [1, 2, 3]:
+                await channel.send(number)
+            await anyio.wait_all_tasks_blocked()
+            _half_close_from_caller(pipe, channel, "send")
+            with anyio.fail_after(1):
+                assert await channel.wait_closed() == 6
+
+
+async def test_the_caller_ending_its_sending_does_not_cancel_a_busy_handler():
+    proceed = anyio.Event()
+
+    async def busy(channel):
+        await proceed.wait()
+        return "finished"
+
+    pipe = rsht.Pipe()
+    async with open_inloop(pipe=pipe, services={"t.busy": busy}) as gateway:
+        async with gateway.open("t.busy") as channel:
+            await anyio.wait_all_tasks_blocked()
+            _half_close_from_caller(pipe, channel, "send")
+            await anyio.wait_all_tasks_blocked()
+            proceed.set()
+            with anyio.fail_after(1):
+                assert await channel.wait_closed() == "finished"
+
+
+async def test_the_caller_ending_its_receiving_fails_the_handlers_sends():
+    async def talk(channel):
+        await channel.receive()
+        try:
+            await channel.send("unwanted")
+        except rsh.ChannelClosed:
+            return "refused"
+        return "sent"
+
+    pipe = rsht.Pipe()
+    async with open_inloop(pipe=pipe, services={"t.talk": talk}) as gateway:
+        async with gateway.open("t.talk") as channel:
+            await anyio.wait_all_tasks_blocked()
+            _half_close_from_caller(pipe, channel, "receive")
+            await channel.send("go")
+            with anyio.fail_after(1):
+                assert await channel.wait_closed() == "refused"

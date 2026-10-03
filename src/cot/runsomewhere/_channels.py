@@ -38,7 +38,10 @@ class Channel:
         self._credit_arrived: anyio.Event | None = None
         self._unacknowledged = 0
         self._closed_locally = False
+        #: the peer's full close: its result or error
         self._peer_close: dict[str, Any] | None = None
+        self._peer_ended_sending = False
+        self._peer_ended_receiving = False
         self._peer_closed = anyio.Event()
         self._failure: BaseException | None = None
         self._receivers_waiting = 0
@@ -148,6 +151,14 @@ class Channel:
             self._credit_arrived.set()
 
     def _closed_by_peer(self, info: dict[str, Any]) -> None:
+        ends = info.pop("ends", None)
+        self._peer_ended_sending |= ends in (None, "send")
+        self._peer_ended_receiving |= ends in (None, "receive")
+        if ends is not None:
+            # a half-close carries no result and stops nothing: the handler
+            # learns of it from its next channel operation
+            self._wake()
+            return
         self._peer_close = info
         self._peer_closed.set()
         waited_for = self._receivers_waiting > 0
@@ -170,6 +181,8 @@ class Channel:
             self._credit_arrived.set()
 
     def _consumed(self, size: int) -> None:
+        # after the peer ends sending its credit still comes back: it is how
+        # the peer learns what was taken
         if self._closed_locally or self._peer_close is not None:
             return
         self._unacknowledged += size
@@ -193,15 +206,16 @@ class Channel:
         if self._closed_locally:
             msg = f"{self!r} was closed by this side"
             raise ChannelClosed(msg)
-        if self._peer_close is not None:
+        if self._peer_ended_receiving:
             msg = f"{self!r} was closed by the other side"
             raise ChannelClosed(msg)
         if self._failure is not None:
             raise self._failure
 
     def _raise_if_finished(self) -> None:
-        if self._peer_close is not None:
-            self._close_result()
+        if self._peer_ended_sending:
+            if self._peer_close is not None:
+                self._close_result()
             msg = f"{self!r} was closed by the other side"
             raise ChannelClosed(msg)
         if self._failure is not None:
@@ -346,9 +360,14 @@ class Connection:
             if channel is not None:
                 channel._grant(int(_CREDIT.unpack(frame.payload)[0]))
         elif kind == FrameType.CLOSE:
-            channel = self._channels.pop(frame.channel, None)
+            channel = self._channels.get(frame.channel)
             if channel is not None:
-                channel._closed_by_peer(decode(frame.payload, self._channel_for))
+                info = decode(frame.payload, self._channel_for)
+                # a half-closed channel stays routed: its full close, with the
+                # result or error, is still to come
+                if "ends" not in info:
+                    del self._channels[frame.channel]
+                channel._closed_by_peer(info)
 
     def _set_gone(self, reason: str) -> None:
         if self.failure is not None:
