@@ -60,5 +60,11 @@ class ThreadChannel:
     def new(self) -> ThreadChannel:
         return ThreadChannel(self.async_channel.new())
 
+    def close_send(self) -> None:
+        anyio.from_thread.run_sync(self.async_channel.close_send)
+
+    def close_receive(self) -> None:
+        anyio.from_thread.run_sync(self.async_channel.close_receive)
+
     def close(self) -> None:
         anyio.from_thread.run_sync(self.async_channel.close)

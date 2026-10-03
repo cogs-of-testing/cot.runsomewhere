@@ -165,3 +165,68 @@ async def test_the_caller_ending_its_receiving_fails_the_handlers_sends():
             await channel.send("go")
             with anyio.fail_after(1):
                 assert await channel.wait_closed() == "refused"
+
+
+async def test_ending_sending_ends_the_handlers_input_and_leaves_its_result(gateway):
+    async with gateway.open("rsh_test_services.add") as channel:
+        for number in [1, 2, 3]:
+            await channel.send(number)
+        channel.close_send()
+        assert await channel.wait_closed() == 6
+
+
+async def test_a_sync_handler_sees_the_end_of_sending_as_the_end_of_iteration(gateway):
+    async with gateway.open("rsh_test_services.sync_add") as channel:
+        for number in [1, 2, 3]:
+            await channel.send(number)
+        channel.close_send()
+        assert await channel.wait_closed() == 6
+
+
+async def test_sending_after_ending_sending_raises_channel_closed(gateway):
+    async with gateway.open("rsh_test_services.add") as channel:
+        channel.close_send()
+        with pytest.raises(rsh.ChannelClosed, match="this side"):
+            await channel.send(1)
+
+
+async def test_the_peer_still_sends_after_the_handler_ended_its_sending(gateway):
+    async with gateway.open("rsh_test_services.ask", question="name?") as channel:
+        assert [item async for item in channel] == ["name?"]
+        await channel.send("rsh")
+        assert await channel.wait_closed() == "rsh"
+
+
+async def test_ending_receiving_discards_what_arrived_and_fails_the_peers_sends():
+    sent_more = anyio.Event()
+    outcome = []
+
+    async def chatter(channel):
+        await channel.send("first")
+        await channel.receive()
+        try:
+            await channel.send("second")
+        except rsh.ChannelClosed:
+            outcome.append("refused")
+        sent_more.set()
+        return "done"
+
+    async with open_inloop(services={"t.chatter": chatter}) as gateway:
+        async with gateway.open("t.chatter") as channel:
+            await anyio.wait_all_tasks_blocked()
+            channel.close_receive()
+            with pytest.raises(rsh.ChannelClosed, match="this side"):
+                await channel.receive()
+            await channel.send("go")
+            with anyio.fail_after(1):
+                await sent_more.wait()
+                assert await channel.wait_closed() == "done"
+    assert outcome == ["refused"]
+
+
+async def test_ending_both_directions_is_a_full_close(gateway):
+    async with gateway.open("rsh_test_services.add") as channel:
+        channel.close_send()
+        channel.close_receive()
+        with pytest.raises(rsh.ChannelClosed, match="this side"):
+            await channel.wait_closed()

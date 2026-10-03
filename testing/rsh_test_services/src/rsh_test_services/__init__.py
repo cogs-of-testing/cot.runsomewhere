@@ -15,12 +15,25 @@ async def echo(channel):
 
 
 async def total(channel):
-    # closing ends a channel in both directions, so the end of input is a
-    # None item rather than a close
+    # input ends at a None item; add is the same service ended by close_send
     result = 0
     while (item := await channel.receive()) is not None:
         result += item
     return result
+
+
+async def add(channel):
+    return sum([item async for item in channel])
+
+
+def sync_add(channel):
+    return sum(channel)
+
+
+async def ask(channel, *, question):
+    await channel.send(question)
+    channel.close_send()
+    return await channel.receive()
 
 
 async def fail(channel, *, message):

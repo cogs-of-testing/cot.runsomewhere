@@ -91,3 +91,14 @@ def test_ad_hoc_services_are_refused_by_a_subinterpreter_host(engine):
             with pytest.raises(rsh.StateError, match="subinterpreter"):
                 with group.spawn(rsht.InLoop(services={"t.echo": echo})):
                     pass
+
+
+def test_ending_sending_through_the_sync_facade_leaves_the_result(engine):
+    with rsh.use_engine(engine):
+        with rsh.sync.open_group() as group:
+            with group.spawn(rsht.InLoop()) as gateway:
+                with gateway.open("rsh_test_services.add") as channel:
+                    for number in [1, 2, 3]:
+                        channel.send(number)
+                    channel.close_send()
+                    assert channel.wait_closed(timeout=5) == 6

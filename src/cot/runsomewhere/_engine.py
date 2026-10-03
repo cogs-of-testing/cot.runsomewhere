@@ -218,6 +218,12 @@ class HostServer:
     async def op_send(self, channel: int, value: Any) -> None:
         await self._objects[channel].send(value)
 
+    async def op_close_send(self, channel: int) -> None:
+        self._objects[channel].close_send()
+
+    async def op_close_receive(self, channel: int) -> None:
+        self._objects[channel].close_receive()
+
     async def op_receive(self, channel: int, timeout: float | None) -> Any:
         with anyio.fail_after(timeout):
             return await self._objects[channel].receive()
@@ -497,6 +503,14 @@ class AsyncHostedChannel:
 
     async def receive(self) -> Any:
         return await self._engine.acall("receive", self._handle, None)
+
+    # sync in the async API too: queued behind everything sent before, and not
+    # waited for, so the caller's loop never blocks on the host
+    def close_send(self) -> None:
+        self._engine.submit("close_send", self._handle)
+
+    def close_receive(self) -> None:
+        self._engine.submit("close_receive", self._handle)
 
     async def wait_closed(self) -> Any:
         return await self._engine.acall("wait_closed", self._handle, None)

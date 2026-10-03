@@ -14,6 +14,9 @@ dependencies = []
 [project.entry-points."cot.runsomewhere.services"]
 "rsh_test_services.echo" = "rsh_test_services:echo"
 "rsh_test_services.total" = "rsh_test_services:total"
+"rsh_test_services.add" = "rsh_test_services:add"
+"rsh_test_services.sync_add" = "rsh_test_services:sync_add"
+"rsh_test_services.ask" = "rsh_test_services:ask"
 "rsh_test_services.fail" = "rsh_test_services:fail"
 "rsh_test_services.produce" = "rsh_test_services:produce"
 "rsh_test_services.env" = "rsh_test_services:env"

@@ -138,6 +138,12 @@ class Channel:
     def wait_closed(self, timeout: float | None = None) -> Any:
         return self._engine.call("wait_closed", self._handle, timeout)
 
+    def close_send(self) -> None:
+        self._engine.call("close_send", self._handle)
+
+    def close_receive(self) -> None:
+        self._engine.call("close_receive", self._handle)
+
     def __iter__(self) -> Iterator[Any]:
         try:
             while True:
@@ -161,6 +167,12 @@ class _NonSuspending:
 
     async def wait_closed(self) -> Any:
         return self._channel.wait_closed()
+
+    def close_send(self) -> None:
+        self._channel.close_send()
+
+    def close_receive(self) -> None:
+        self._channel.close_receive()
 
 
 class _SyncClient:

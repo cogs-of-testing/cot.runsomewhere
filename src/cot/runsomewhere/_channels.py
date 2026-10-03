@@ -38,6 +38,8 @@ class Channel:
         self._credit_arrived: anyio.Event | None = None
         self._unacknowledged = 0
         self._closed_locally = False
+        self._ended_sending = False
+        self._ended_receiving = False
         #: the peer's full close: its result or error
         self._peer_close: dict[str, Any] | None = None
         self._peer_ended_sending = False
@@ -74,6 +76,9 @@ class Channel:
         # a cancellation is taken either before an item is removed or not at
         # all, so a cancelled receive never loses one
         await checkpoint_if_cancelled()
+        if self._ended_receiving:
+            msg = f"{self!r} was closed by this side"
+            raise ChannelClosed(msg)
         while not self._items:
             self._raise_if_finished()
             self._item_arrived = anyio.Event()
@@ -112,13 +117,46 @@ class Channel:
         self.close()
         await cancel_shielded_checkpoint()
 
+    def close_send(self) -> None:
+        """End sending: the peer takes what was sent, then sees the end."""
+        self._end(send=True)
+
+    def close_receive(self) -> None:
+        """End receiving: what arrived and was not taken is discarded, and the
+        peer's sends fail."""
+        self._end(send=False)
+
+    def _end(self, *, send: bool) -> None:
+        if self._closed_locally or (
+            self._ended_sending if send else self._ended_receiving
+        ):
+            return
+        if self._ended_receiving if send else self._ended_sending:
+            self.close()
+            return
+        if send:
+            self._ended_sending = True
+        else:
+            self._ended_receiving = True
+            self._items.clear()
+        if self._peer_close is None and self._failure is None:
+            ends = "send" if send else "receive"
+            self._connection.send_frame(
+                FrameType.CLOSE, self.id, encode({"ends": ends})
+            )
+        self._wake()
+
     def close(
         self, *, result: object = None, error: BaseException | None = None
     ) -> None:
-        """Close for both directions, telling the peer unless it closed first."""
+        """Close both directions, telling the peer unless it closed first.
+
+        Only this close carries a result or an error, also after `close_send`.
+        """
         if self._closed_locally:
             return
         self._closed_locally = True
+        self._ended_sending = self._ended_receiving = True
         if self._peer_close is None and self._failure is None:
             info: dict[str, Any] = {}
             if error is not None:
@@ -139,7 +177,7 @@ class Channel:
     # -- driven by the connection ---------------------------------------------
 
     def _deliver(self, value: Any, size: int) -> None:
-        if self._closed_locally:
+        if self._ended_receiving:
             return
         self._items.append((value, size))
         if self._item_arrived is not None:
@@ -183,7 +221,7 @@ class Channel:
     def _consumed(self, size: int) -> None:
         # after the peer ends sending its credit still comes back: it is how
         # the peer learns what was taken
-        if self._closed_locally or self._peer_close is not None:
+        if self._ended_receiving or self._peer_close is not None:
             return
         self._unacknowledged += size
         if self._unacknowledged >= DEFAULT_WINDOW // 4 or not self._items:
@@ -203,7 +241,7 @@ class Channel:
         return self._peer_close.get("result")
 
     def _raise_if_unusable(self) -> None:
-        if self._closed_locally:
+        if self._ended_sending:
             msg = f"{self!r} was closed by this side"
             raise ChannelClosed(msg)
         if self._peer_ended_receiving:
