@@ -4,8 +4,8 @@
 whether runsomewhere fits their system; Ronny prompted it, it did the work,
 Ronny read it.*
 
-Status: design. Nothing is implemented yet. The API below is a sketch; names
-may still move, the model will not.
+Status: design, partly implemented; the build order below says how far. The
+API below is a sketch; names may still move, the model will not.
 
 ```python
 from cot import runsomewhere as rsh
@@ -310,6 +310,11 @@ Build order, each step its own pull request: skeleton; core protocol with the
 `Process` place; services, clients and remote exec; the engine hosts and the
 sync facade; `Thread` and `Subinterpreter`; uv provisioning, `Ssh` and
 `Deployment`; podman then docker; later kubernetes and a gevent profile.
+
+The first four steps landed together, in one pull request: the skeleton, the
+core protocol with `Process`, services, clients and remote exec, and the
+engine hosts with the sync facade. `Thread` and `Subinterpreter` places are
+next.
 
 Proposed, not yet settled:
 
