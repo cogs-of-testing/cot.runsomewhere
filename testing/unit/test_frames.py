@@ -19,7 +19,7 @@ FRAMES = [
     Frame(FrameType.DATA, 2, b"x" * 1000),
     Frame(FrameType.CREDIT, 2, b"\x00\x10\x00\x00"),
     Frame(FrameType.CLOSE, 1, b"result"),
-    Frame(FrameType.GATEWAY_CLOSE, 0, b""),
+    Frame(FrameType.GATEWAY_TERMINATE, 0, b""),
 ]
 
 
@@ -106,7 +106,7 @@ def test_frame_types_cover_the_designed_set():
         "DATA",
         "CREDIT",
         "CLOSE",
-        "GATEWAY_CLOSE",
+        "GATEWAY_TERMINATE",
         "STOP",
         "GATEWAY_STOP",
     }

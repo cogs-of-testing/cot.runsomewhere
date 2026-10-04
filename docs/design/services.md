@@ -157,7 +157,13 @@ result; closing the channel ends the call. A gateway's shutdown stops its
 services first and closes what is left
 ([shutdown](gateways-and-channels.md#shutdown)). A handler learns of a stop
 from `channel.stopping`; one that ignores it is closed when the caller's
-deadline passes.
+deadline passes. A stopping handler may still create channels with
+`channel.new()`, for instance to hand back a final report.
+
+Workers spawned through a relay or a proxy are shut down before it. The
+engine tracks that, as a property of each spawn, not of the service
+([dependents](gateways-and-channels.md#dependents)). The worker tracks
+nothing.
 
 Closing the channel from the caller, closing the client, or closing the
 gateway ends a call:

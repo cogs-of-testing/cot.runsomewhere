@@ -376,36 +376,30 @@ async def test_a_channel_left_open_is_stopped_and_reported_when_its_gateway_shut
         await side.send(1)
 
 
-async def test_no_channel_is_created_once_the_gateway_is_stopping():
-    refused = []
+async def test_a_stopping_service_still_creates_channels():
+    async def report_on_stop(channel):
+        await channel.stop_requested()
+        report = channel.new()
+        await channel.send(report)
+        await report.send("final")
+        report.close()
+        return "stopped"
 
-    async def late(channel):
-        side = channel.new()
-        await channel.send(side)
-        # waiting on its own channel, the handler sees the caller leave rather
-        # than being cancelled
-        with contextlib.suppress(rsh.ChannelClosed):
-            await channel.receive()
-        await side.stop_requested()
-        try:
-            side.new()
-        except rsh.StateError:
-            refused.append(True)
+    async with open_inloop(services={"t.report": report_on_stop}) as gateway:
+        async with gateway.open("t.report") as channel:
+            gateway._connection.send_frame(FrameType.GATEWAY_STOP, 0)
+            channel.stop()
+            with anyio.fail_after(1):
+                report = await channel.receive()
+                assert await report.receive() == "final"
+                assert await channel.wait_closed() == "stopped"
 
-    async def leave_it_open():
-        async with rsh.open_group() as group:
-            place = rsht.InLoop(services={"t.late": late})
-            async with (
-                group.spawn(
-                    place, teardown=rsh.Teardown(stop=0.2, drain=0.2)
-                ) as gateway,
-                gateway.open("t.late") as channel,
-            ):
-                await channel.receive()
 
-    with pytest.warns(ResourceWarning, match="still open"):
-        await leave_it_open()
-    assert refused == [True]
+async def test_a_service_call_after_the_gateway_stop_is_refused(gateway):
+    gateway._connection.send_frame(FrameType.GATEWAY_STOP, 0)
+    async with gateway.open("rsh_test_services.echo") as channel:
+        with anyio.fail_after(1), pytest.raises(rsh.RemoteError, match="stopping"):
+            await channel.wait_closed()
 
 
 async def test_the_stop_phase_finishes_channels_left_open_concurrently():
