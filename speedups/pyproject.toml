@@ -1,0 +1,42 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [ "setuptools>=77", "setuptools-scm>=8" ]
+
+[project]
+name = "cot-runsomewhere-speedups"
+description = "The cot.runsomewhere value codec in C"
+readme = "README.md"
+license = "MIT"
+authors = [
+  { name = "Ronny Pfannschmidt", email = "opensource@ronnypfannschmidt.de" },
+]
+requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: C",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = [ "version" ]
+urls.Source = "https://github.com/cogs-of-testing/cot.runsomewhere/tree/main/speedups"
+
+[tool.setuptools]
+ext-modules = [
+  { name = "_cot_runsomewhere_speedups", sources = [ "src/_cot_runsomewhere_speedups.c" ] },
+]
+# a single extension module, no package
+packages = [  ]
+
+[tool.setuptools_scm]
+# versioned with the repository's tags, like cot.runsomewhere itself
+root = ".."
+fallback_version = "0.0.0"
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+# every runner builds for itself, so every wheel is tested where it was built
+archs = [ "native" ]
+# the format checks live with the reference codec, in the main package
+before-test = "pip install {project}"
+test-requires = [ "hypothesis>=6", "pytest>=8", "pytest-timeout>=2.3" ]
+test-command = "pytest {project}/testing/speedups -p no:cacheprovider"
