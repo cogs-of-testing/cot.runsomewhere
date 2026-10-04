@@ -4,6 +4,7 @@ import anyio
 import pytest
 
 from cot import runsomewhere as rsh
+from cot.runsomewhere import _channels
 from cot.runsomewhere import testing as rsht
 from cot.runsomewhere._channels import FRAGMENT, MAX_ITEM
 from cot.runsomewhere._frames import PREAMBLE, FrameDecoder, encode_frame
@@ -23,7 +24,10 @@ def credit_only(frame):
     return frame.channel and not frame.payload and not frame.more
 
 
-async def test_credit_rides_on_replies_in_request_response_traffic():
+async def test_credit_rides_on_replies_in_request_response_traffic(monkeypatch):
+    # what rides along, not how fast: on a slow runner the loop below can take
+    # longer than the real delay between a reply and the next request
+    monkeypatch.setattr(_channels, "CREDIT_DELAY", 10)
     pipe = rsht.Pipe(record=True)
     async with open_inloop(pipe=pipe) as gateway:
         async with gateway.open("rsh_test_services.echo") as channel:
