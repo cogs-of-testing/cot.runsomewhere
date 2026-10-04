@@ -1,65 +1,99 @@
-import struct
-
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from cot.runsomewhere._frames import (
-    HEADER_SIZE,
-    MAX_PAYLOAD,
+    MAX_FIELD,
     PREAMBLE,
     Frame,
     FrameDecoder,
     FrameError,
-    FrameType,
     encode_frame,
 )
 
 FRAMES = [
-    Frame(FrameType.OPEN, 1, b"open payload"),
-    Frame(FrameType.DATA, 1, b""),
-    Frame(FrameType.DATA, 2, b"x" * 1000),
-    Frame(FrameType.CREDIT, 2, b"\x00\x10\x00\x00"),
-    Frame(FrameType.CLOSE, 1, b"result"),
-    Frame(FrameType.GATEWAY_TERMINATE, 0, b""),
+    Frame(1, b"open payload"),
+    Frame(2, b"x" * 1000),
+    Frame(2, b"", taken=300),
+    Frame(3, b"first", more=True),
+    Frame(3, b"", abort=True),
+    Frame(0, b"control", taken=0),
+    Frame(MAX_FIELD, b"y" * 70_000, taken=MAX_FIELD),
 ]
 
 
-def stream():
-    return PREAMBLE + b"".join(encode_frame(frame) for frame in FRAMES)
+def encoded(frame):
+    return encode_frame(
+        frame.channel, frame.payload, frame.taken, more=frame.more, abort=frame.abort
+    )
 
 
-def test_header_is_type_channel_length():
-    encoded = encode_frame(Frame(FrameType.DATA, 7, b"abc"))
-    assert HEADER_SIZE == 9
-    assert encoded[:HEADER_SIZE] == struct.pack(">BII", FrameType.DATA, 7, 3)
-    assert encoded[HEADER_SIZE:] == b"abc"
+def stream(frames=FRAMES):
+    return PREAMBLE + b"".join(map(encoded, frames))
+
+
+@pytest.mark.parametrize(
+    ("frame", "header"),
+    [
+        (Frame(0, b""), 1),
+        (Frame(1, b"x" * 300), 4),
+        (Frame(1, b"x" * 300, taken=200), 5),
+        (Frame(1, b"", taken=200), 3),
+        (Frame(300, b"x" * 70_000, taken=70_000), 9),
+    ],
+    ids=["empty-control", "item", "item-with-credit", "credit-only", "widest"],
+)
+def test_a_field_takes_only_the_bytes_its_value_needs(frame, header):
+    assert len(encoded(frame)) == header + len(frame.payload)
 
 
 def test_whole_stream_decodes_to_the_frames_sent():
     assert FrameDecoder().feed(stream()) == FRAMES
 
 
-@pytest.mark.parametrize("chunk", [1, 2, 3, 8, 9, 10, 64])
-def test_any_chunking_decodes_to_the_same_frames(chunk):
-    data = stream()
+frames = st.builds(
+    Frame,
+    st.integers(0, MAX_FIELD),
+    st.binary(max_size=300),
+    st.integers(0, MAX_FIELD),
+    more=st.booleans(),
+    abort=st.just(False),
+) | st.builds(
+    Frame,
+    st.integers(0, MAX_FIELD),
+    payload=st.just(b""),
+    taken=st.integers(0, MAX_FIELD),
+    more=st.just(False),
+    abort=st.just(True),
+)
+
+
+@given(st.lists(frames, max_size=8), st.lists(st.integers(1, 64), min_size=1))
+def test_any_chunking_decodes_to_the_same_frames(sent, chunks):
+    data = stream(sent)
     decoder = FrameDecoder()
     decoded = []
-    for start in range(0, len(data), chunk):
-        decoded.extend(decoder.feed(data[start : start + chunk]))
-    assert decoded == FRAMES
+    start = 0
+    for size in chunks * (len(data) // len(chunks) + 1):
+        if start >= len(data):
+            break
+        decoded.extend(decoder.feed(data[start : start + size]))
+        start += size
+    assert decoded == sent
 
 
 def test_every_two_way_split_decodes_to_the_same_frames():
-    data = stream()
+    data = stream(FRAMES[:6])
     for cut in range(len(data) + 1):
         decoder = FrameDecoder()
-        assert decoder.feed(data[:cut]) + decoder.feed(data[cut:]) == FRAMES
+        assert decoder.feed(data[:cut]) + decoder.feed(data[cut:]) == FRAMES[:6]
 
 
 def test_a_partial_frame_yields_nothing_until_complete():
     decoder = FrameDecoder()
-    encoded = encode_frame(FRAMES[2])
-    assert decoder.feed(PREAMBLE + encoded[:-1]) == []
-    assert decoder.feed(encoded[-1:]) == [FRAMES[2]]
+    frame = encoded(FRAMES[1])
+    assert decoder.feed(PREAMBLE + frame[:-1]) == []
+    assert decoder.feed(frame[-1:]) == [FRAMES[1]]
 
 
 def test_a_stream_without_the_preamble_is_refused_on_the_first_bytes():
@@ -68,26 +102,15 @@ def test_a_stream_without_the_preamble_is_refused_on_the_first_bytes():
 
 
 def test_another_protocol_version_is_refused_by_the_preamble():
-    other = PREAMBLE[:-1] + bytes([PREAMBLE[-1] + 1])
+    other = PREAMBLE[:-1] + bytes([PREAMBLE[-1] - 1])
     with pytest.raises(FrameError, match="protocol version"):
         FrameDecoder().feed(other)
 
 
-def test_unknown_frame_type_is_refused():
-    bogus = struct.pack(">BII", 0xFF, 1, 0)
-    with pytest.raises(FrameError, match="frame type"):
-        FrameDecoder().feed(PREAMBLE + bogus)
-
-
-def test_a_length_above_the_limit_is_refused_before_buffering_it():
-    header = struct.pack(">BII", FrameType.DATA, 1, MAX_PAYLOAD + 1)
-    with pytest.raises(FrameError, match="too large"):
-        FrameDecoder().feed(PREAMBLE + header)
-
-
-def test_encoding_refuses_a_payload_above_the_limit():
-    with pytest.raises(FrameError, match="too large"):
-        encode_frame(Frame(FrameType.DATA, 1, bytes(MAX_PAYLOAD + 1)))
+@pytest.mark.parametrize(("channel", "taken"), [(MAX_FIELD + 1, 0), (1, MAX_FIELD + 1)])
+def test_a_field_above_24_bits_is_refused_when_encoding(channel, taken):
+    with pytest.raises(FrameError, match="out of range"):
+        encode_frame(channel, b"", taken)
 
 
 def test_decoder_is_unusable_after_an_error():
@@ -98,21 +121,9 @@ def test_decoder_is_unusable_after_an_error():
         decoder.feed(PREAMBLE)
 
 
-def test_frame_types_cover_the_designed_set():
-    assert {t.name for t in FrameType} == {
-        "HELLO",
-        "CONFIG",
-        "OPEN",
-        "DATA",
-        "CREDIT",
-        "CLOSE",
-        "GATEWAY_TERMINATE",
-        "STOP",
-        "GATEWAY_STOP",
-    }
-
-
-def test_channel_ids_use_the_full_unsigned_range():
-    for channel in [0, 1, 2**31, 2**32 - 1]:
-        frame = Frame(FrameType.DATA, channel, b"")
-        assert FrameDecoder().feed(PREAMBLE + encode_frame(frame)) == [frame]
+@pytest.mark.parametrize(
+    "tag", [0xC0, 0x44], ids=["abort-and-more", "abort-with-payload"]
+)
+def test_an_abort_that_carries_or_continues_something_is_refused(tag):
+    with pytest.raises(FrameError, match="invalid frame tag"):
+        FrameDecoder().feed(PREAMBLE + bytes([tag, 1]))

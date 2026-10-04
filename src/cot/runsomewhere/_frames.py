@@ -1,46 +1,75 @@
-"""Sans-IO framing: bytes in, frames out."""
+"""Sans-IO framing: bytes in, frames out.
+
+A frame is a tag byte, up to three big-endian fields of 0 to 3 bytes each,
+and a payload::
+
+    tag: [ more | abort | chan:2 | len:2 | taken:2 ]   then chan, len, taken
+
+Each 2-bit code is the byte count of its field; a field of 0 takes no bytes.
+"""
 
 from __future__ import annotations
 
-import enum
-import struct
 from typing import NamedTuple
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 MAGIC = b"\x89RSH"
 PREAMBLE = MAGIC + bytes([PROTOCOL_VERSION])
-HEADER = struct.Struct(">BII")
-HEADER_SIZE = HEADER.size
-MAX_PAYLOAD = 64 * 1024 * 1024
+#: the largest value a header field carries
+MAX_FIELD = (1 << 24) - 1
+
+_MORE = 0x80
+_ABORT = 0x40
+# the header length, tag byte included, for each combination of field sizes
+_HEADER_SIZE = [1 + (code >> 4) + ((code >> 2) & 3) + (code & 3) for code in range(64)]
 
 
 class FrameError(ValueError):
     """The byte stream is not a valid runsomewhere frame stream."""
 
 
-class FrameType(enum.IntEnum):
-    HELLO = 1
-    CONFIG = 2
-    OPEN = 3
-    DATA = 4
-    CREDIT = 5
-    CLOSE = 6
-    GATEWAY_TERMINATE = 7
-    STOP = 8
-    GATEWAY_STOP = 9
-
-
 class Frame(NamedTuple):
-    type: FrameType
+    #: the channel; 0 is the control channel
     channel: int
-    payload: bytes
+    payload: bytes = b""
+    #: bytes of the other direction taken since the last report: credit
+    taken: int = 0
+    #: a fragment, with more of the same item to follow
+    more: bool = False
+    #: the item in progress on this channel is dropped
+    abort: bool = False
 
 
-def encode_frame(frame: Frame) -> bytes:
-    if len(frame.payload) > MAX_PAYLOAD:
-        msg = f"payload too large: {len(frame.payload)} bytes, limit {MAX_PAYLOAD}"
+def _size(value: int) -> int:
+    if value < 0 or value > MAX_FIELD:
+        msg = f"frame field out of range: {value}"
         raise FrameError(msg)
-    return HEADER.pack(frame.type, frame.channel, len(frame.payload)) + frame.payload
+    return (value.bit_length() + 7) // 8
+
+
+def encode_frame(
+    channel: int,
+    payload: bytes = b"",
+    taken: int = 0,
+    *,
+    more: bool = False,
+    abort: bool = False,
+) -> bytes:
+    length = len(payload)
+    if abort and (more or length):
+        msg = "an abort carries nothing and continues nothing"
+        raise FrameError(msg)
+    c, n, t = _size(channel), _size(length), _size(taken)
+    tag = (_MORE if more else 0) | (_ABORT if abort else 0) | c << 4 | n << 2 | t
+    return b"".join(
+        (
+            bytes((tag,)),
+            channel.to_bytes(c, "big"),
+            length.to_bytes(n, "big"),
+            taken.to_bytes(t, "big"),
+            payload,
+        )
+    )
 
 
 class FrameDecoder:
@@ -62,38 +91,55 @@ class FrameDecoder:
             raise
 
     def _drain(self) -> list[Frame]:
+        buffer = self._buffer
         if not self._seen_preamble:
             # checked as soon as bytes arrive, so an unrelated program at the
             # other end fails on its first write rather than on a full frame
-            head = bytes(self._buffer[: len(MAGIC)])
+            head = bytes(buffer[: len(MAGIC)])
             if not MAGIC.startswith(head):
                 msg = f"not a runsomewhere stream: starts with {head!r}"
                 raise FrameError(msg)
-            if len(self._buffer) < len(PREAMBLE):
+            if len(buffer) < len(PREAMBLE):
                 return []
-            version = self._buffer[len(MAGIC)]
+            version = buffer[len(MAGIC)]
             if version != PROTOCOL_VERSION:
                 msg = f"protocol version {version}, this side speaks {PROTOCOL_VERSION}"
                 raise FrameError(msg)
-            del self._buffer[: len(PREAMBLE)]
+            del buffer[: len(PREAMBLE)]
             self._seen_preamble = True
 
         frames = []
-        while len(self._buffer) >= HEADER_SIZE:
-            kind, channel, length = HEADER.unpack_from(self._buffer)
-            try:
-                frame_type = FrameType(kind)
-            except ValueError:
-                msg = f"unknown frame type {kind}"
-                raise FrameError(msg) from None
-            if length > MAX_PAYLOAD:
-                msg = f"frame too large: {length} bytes, limit {MAX_PAYLOAD}"
+        pos = 0
+        available = len(buffer)
+        while pos < available:
+            tag = buffer[pos]
+            if tag & _ABORT and tag & (_MORE | 0x0C):
+                # an abort carries nothing and continues nothing
+                msg = f"invalid frame tag 0x{tag:02x}"
                 raise FrameError(msg)
-            end = HEADER_SIZE + length
-            if len(self._buffer) < end:
+            code = tag & 0x3F
+            header = _HEADER_SIZE[code]
+            if available - pos < header:
+                break
+            c, n = code >> 4, (code >> 2) & 3
+            field = pos + 1
+            channel = int.from_bytes(buffer[field : field + c], "big")
+            field += c
+            length = int.from_bytes(buffer[field : field + n], "big")
+            field += n
+            taken = int.from_bytes(buffer[field : pos + header], "big")
+            end = pos + header + length
+            if end > available:
                 break
             frames.append(
-                Frame(frame_type, channel, bytes(self._buffer[HEADER_SIZE:end]))
+                Frame(
+                    channel,
+                    bytes(buffer[pos + header : end]),
+                    taken,
+                    bool(tag & _MORE),
+                    bool(tag & _ABORT),
+                )
             )
-            del self._buffer[:end]
+            pos = end
+        del buffer[:pos]
         return frames

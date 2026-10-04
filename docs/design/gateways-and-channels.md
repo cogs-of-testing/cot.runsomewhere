@@ -410,11 +410,17 @@ is unchanged: there is one stream with one writer queue, so items sent before
 a close arrive before it.
 
 Later control features become ops or fields, not frame types. A control op
-or field the receiver does not know fails only the channel it names, on both
-sides, and both log it at warning level: the gateway (the peer's pid and both
-runsomewhere versions), what was not understood, and the channel. Every other
-channel and the gateway go on. Only bytes that cannot be parsed as frames end
-the gateway.
+or field the receiver does not know fails only the channel it names: the
+receiver logs it at warning level, naming the peer (its pid and
+runsomewhere version), its own version, what was not understood and the
+channel, and closes the channel with an error that says the same, which is
+how the sender learns of it. Every other channel and the gateway go on. A
+known op with a field of the wrong type, and bytes that cannot be parsed as
+frames, end the gateway.
+
+The header has little room for checks: a corrupted byte can read as a valid
+header announcing a large payload, and the decoder waits for it. A tag with
+`abort` and `more`, or `abort` with a payload, is refused.
 
 ### Credit
 
@@ -448,11 +454,11 @@ quarter-window bypass keeps a delay from capping throughput. The cost:
 
 ### Large items
 
-An item larger than a fragment goes out as a chain of frames on its channel;
-every frame but the last sets `more`. Fragments are 64 KiB to start, so
-other channels' frames and control slip in between. A send cancelled
-halfway sends an empty frame with `abort`, and the receiver drops the
-partial item: a cancelled send is still received whole or not at all.
+An item larger than a fragment, 64 KiB, goes out as a chain of frames on its
+channel; every frame but the last sets `more`. The fragments of one item are
+queued together, so a send is never cancelled halfway and is received whole
+or not at all. A frame with `abort`, which carries nothing, drops the item in
+progress on its channel, for a sender that gives up midway.
 
 Credit for a fragmented item comes back when the whole item is taken. An
 item larger than the window waits for the window to be fully open, then goes
