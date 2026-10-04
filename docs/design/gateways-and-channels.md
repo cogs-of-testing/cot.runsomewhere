@@ -334,11 +334,9 @@ Every channel has a window granted by the receiver. A sender whose window is
 exhausted waits (async) or blocks (sync facade); it never buffers on the
 far side. The receiver grants more as its consumer takes items.
 
-**Proposed:** the window is counted in bytes of encoded payload, 1 MiB by
-default, settable per channel at open. One item may exceed the window when
-the window is fully open, so a large item is slow rather than impossible.
-Items above a hard frame limit (64 MiB, proposed) are refused with
-`StateError` at send time; bulk data belongs in the transfer service.
+The window is counted in bytes of encoded payload, 1 MiB by default. How
+credit travels, and how large items pass a small window, is part of
+[the wire](#credit).
 
 ### Cancellation
 
@@ -348,30 +346,179 @@ been written entirely or not at all.
 
 ## The wire
 
-Every frame is a fixed header and a payload:
+The protocol is version 2. Nothing older is deployed, so there is no
+compatibility layer: a peer speaking another version is refused on the first
+read.
 
-| Field   | Size    | Meaning                                                                                                       |
-| ------- | ------- | ------------------------------------------------------------------------------------------------------------- |
-| type    | 1 byte  | hello, config, open, data, credit, close (with the directions it ends), stop, gateway-stop, gateway-terminate |
-| channel | 4 bytes | channel id; 0 for gateway-level frames                                                                        |
-| length  | 4 bytes | payload length                                                                                                |
+The stream starts with 4 magic bytes and the protocol version byte, before
+any frame. A worker started on the wrong stream, or an unrelated program at
+the other end, fails on the first read with a clear message instead of a
+garbled frame.
 
 The decoder is sans-IO: it takes bytes and yields frames, never reads or
 waits, so every transport and every event loop uses the same one.
 
+### Frames
+
+A frame is a header and a payload. The header is one tag byte and up to
+three fields, each 0 to 3 bytes, big-endian:
+
+```text
+tag:  [ more | abort | chan:2 | len:2 | taken:2 ]   then chan, len, taken
+size: 0 = the field is 0 and takes no bytes; 1, 2, 3 = that many bytes
+```
+
+- `chan` is the channel id; 0 is the control channel.
+- `len` is the payload length.
+- `taken` is how many bytes of the other direction this side has taken
+  since it last said so: credit, riding along ([credit](#credit)).
+- `more` and `abort` belong to fragments ([large items](#large-items)).
+
+Each field is at most 24 bits; a larger value is a protocol error. One tag
+byte tells the decoder the header's length, 1 to 10 bytes, so it never peeks
+further.
+
+| Frame                           | v1         | v2    |
+| ------------------------------- | ---------- | ----- |
+| a 300-byte item, no credit owed | 9 B        | 4 B   |
+| the same, with credit owed      | 9 B + 13 B | 5 B   |
+| a credit-only frame             | 13 B       | 3–5 B |
+
 Channel ids are allocated by the side that creates the channel: odd on the
-caller, even on the worker, so both can open without coordination. Payloads
-of data frames are values in a tagged binary encoding; nothing in it can name
-a class or run code on decode.
+caller, even on the worker, so both can open without coordination. Ids are
+never reused while late frames for a closed channel may still be routed by
+id.
+
+### Control
+
+Channels carry only data. Everything else travels on channel 0 as an encoded
+dict with an `op`:
+
+| op                  | Fields                                              |
+| ------------------- | --------------------------------------------------- |
+| `hello`             | protocol, versions, Python, platform, pid, services |
+| `config`            | the worker's configuration, or the answer to it     |
+| `open`              | channel, service, params                            |
+| `close`             | channel, `ends` (send or receive) or result / error |
+| `stop`              | channel, deadline                                   |
+| `gateway-stop`      |                                                     |
+| `gateway-terminate` | deadline                                            |
+
+Control messages are rare, so readability and room to grow win over size. A
+table maps each op to its fields and their types, checked on decode. Ordering
+is unchanged: there is one stream with one writer queue, so items sent before
+a close arrive before it.
+
+Later control features become ops or fields, not frame types. A control op
+or field the receiver does not know fails only the channel it names, on both
+sides, and both log it at warning level: the gateway (the peer's pid and both
+runsomewhere versions), what was not understood, and the channel. Every other
+channel and the gateway go on. Only bytes that cannot be parsed as frames end
+the gateway.
+
+### Credit
+
+Every data frame reports, in `taken`, what this side has taken from the other
+direction since its last report, so request/response traffic costs no credit
+frames at all. Credit is granted on taking, not on arrival, so
+[drain](#closing) keeps its meaning.
+
+When nothing flows back, a credit-only frame goes out, delayed by at most
+1 ms so it can ride a reply. Pending credit is per-channel state, not a
+queued frame; when the writer would go idle it waits up to 1 ms for another
+frame, then flushes every channel's pending credit at once. Credit goes out
+at once when:
+
+- what is taken and not reported reaches a quarter of the window;
+- the sender's remaining credit is low, which the receiver computes exactly
+  as granted + window − received, against a quarter of the window, because
+  the sender may be blocked on it;
+- this side closes or half-closes the channel;
+- a stop arrives, or the gateway is stopping.
+
+Before a close, the remaining credit is flushed in the last frame.
+
+Why 1 ms: measured on v1 with 3000 round trips of a 10-byte echo, async
+handlers reply 13–18 µs after the credit is due (median), and sync handlers
+80–96 µs, all within 1 ms. TCP's delayed acknowledgement (RFC 1122, RFC 9293:
+up to 500 ms; Linux 40–200 ms) and QUIC's `max_ack_delay` (RFC 9000: 25 ms)
+are sized for WAN round trips. On a window-limited one-way stream, the
+quarter-window bypass keeps a delay from capping throughput. The cost:
+`drain()` on a channel with no reply traffic returns up to 1 ms later.
+
+### Large items
+
+An item larger than a fragment goes out as a chain of frames on its channel;
+every frame but the last sets `more`. Fragments are 64 KiB to start, so
+other channels' frames and control slip in between. A send cancelled
+halfway sends an empty frame with `abort`, and the receiver drops the
+partial item: a cancelled send is still received whole or not at all.
+
+Credit for a fragmented item comes back when the whole item is taken. An
+item larger than the window waits for the window to be fully open, then goes
+through, so a large item is slow rather than impossible.
+
+An item is encoded whole and decoded once all its fragments are in; items
+above 64 MiB are refused with `StateError` at send time. Bulk data belongs
+in the transfer service. Encoding and decoding an item in pieces, so that
+neither side holds it whole, is left for later.
+
+### Values
+
+Payloads of data frames are values in a tagged binary encoding. Nothing in it
+can name a class or run code on decode. One tag byte per item, multi-byte
+fields big-endian:
+
+| Tag                  | Item                                          |
+| -------------------- | --------------------------------------------- |
+| `0x80` + n           | int n, 0 ≤ n < 64                             |
+| `0xC0` + n           | str of n UTF-8 bytes, n < 32                  |
+| `N` `T` `F`          | None, True, False                             |
+| `1` `2` `4`          | int in 8, 16 or 32 bits, signed               |
+| `i` / `I`            | int as signed bytes, their count in 8/32 bits |
+| `D` `C`              | float, complex: IEEE 754 doubles              |
+| `s` / `S`, `b` / `B` | str, bytes: their size in 8 / 32 bits         |
+| `[` / `]`, `(` / `)` | list, tuple: their count in 8 / 32 bits       |
+| `<` / `l`, `>` / `g` | set, frozenset, likewise                      |
+| `{` / `}`            | dict: its pair count, then key, value, ...    |
+| `X`                  | extension: a code byte, then one item         |
+
+Fixed widths, chosen over varints by measurement: the tag alone says how
+many bytes follow, which keeps decoding simple in pure Python and in C. On an
+xdist-style report the encoding is 425 bytes against 598 in v1, and both
+directions are faster.
+
+The codec knows nothing of channels. A value it has no encoding for goes to
+a hook of its caller, which returns an extension code and an item; decoding
+hands both back. The connection owns code 0, a channel, carried as its id:
+it checks that the channel belongs to this gateway on the way out, and
+resolves the id to its end of the channel on the way in. Containers and
+extensions nest at most 200 deep, the same limit on both sides.
+
+**Speedups.** `cot-runsomewhere-speedups`, built from `speedups/` in this
+repository with its own pipeline, is the same codec in C (import name
+`_cot_runsomewhere_speedups`), for Linux, macOS and Windows. It is optional:
+the pure-Python codec is the reference, and the C one is used when it is
+installed and speaks the same format. Both produce the same bytes, which the
+tests check.
+
+### Names
 
 Names on the wire are entry-point names: services by their service name,
 places (sent to `rsh.via`) by their place name. No frame carries an import
 path.
 
-**Proposed:** the stream starts with 4 magic bytes and a protocol version
-byte, before any frame, so that a worker started on the wrong stream, or an
-unrelated program at the other end, fails on the first read with a clear
-message instead of a garbled frame.
+### Considered and dropped
+
+- **Varints for value lengths and small ints.** They save bytes over v1 but
+  cost as much CPU as v1 in pure Python. Fixed widths are smaller still and
+  faster.
+- **Credit as its own control message.** At 35–69 bytes per credit, it costs
+  more than it saves in chatty traffic.
+- **Header fields encoded UTF-8 style.** Strict UTF-8 tops out at 21 bits and
+  wastes 2 bits per continuation byte.
+- **Reusing channel ids to keep them small.** Unsafe while late frames for a
+  closed channel are routed by id.
 
 ## Errors
 
