@@ -3,3 +3,6 @@ __pycache__/
 /site/
 .hypothesis/
 .benchmarks/
+speedups/build/
+*.egg-info/
+wheelhouse/

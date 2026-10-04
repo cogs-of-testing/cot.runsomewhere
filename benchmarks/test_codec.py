@@ -6,7 +6,12 @@ saved run.
 
 import pytest
 
-from cot.runsomewhere._values import decode, encode
+from cot.runsomewhere._values import DecodeError, py_decode, py_encode
+
+try:
+    import _cot_runsomewhere_speedups as speedups
+except ImportError:
+    speedups = None
 
 REPORT = (
     "runtest_logreport",
@@ -64,15 +69,27 @@ MESSAGES = {
 }
 
 
+@pytest.fixture(params=["python", "c"])
+def codec(request):
+    """(encode, decode) of one implementation; C where speedups is installed."""
+    if request.param == "python":
+        return py_encode, py_decode
+    if speedups is None:
+        pytest.skip("cot-runsomewhere-speedups is not installed")
+    return speedups.encode, lambda data, hook: speedups.decode(data, hook, DecodeError)
+
+
 @pytest.mark.parametrize("name", MESSAGES)
-def test_encode(benchmark, name):
+def test_encode(benchmark, codec, name):
+    encode, _ = codec
     benchmark.group = f"encode {name}"
     benchmark.extra_info["bytes"] = len(encode(MESSAGES[name], reference))
     benchmark(encode, MESSAGES[name], reference)
 
 
 @pytest.mark.parametrize("name", MESSAGES)
-def test_decode(benchmark, name):
+def test_decode(benchmark, codec, name):
+    encode, decode = codec
     benchmark.group = f"decode {name}"
     data = encode(MESSAGES[name], reference)
     benchmark(decode, data, lambda _code, id: Reference(id))

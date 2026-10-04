@@ -141,3 +141,5 @@ files = [ "src" ]
 strict = true
 warn_unreachable = true
 enable_error_code = [ "ignore-without-code", "redundant-expr", "truthy-bool" ]
+# optional, built from speedups/, and absent where mypy runs
+overrides = [ { module = "_cot_runsomewhere_speedups", ignore_missing_imports = true } ]

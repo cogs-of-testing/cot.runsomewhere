@@ -26,13 +26,22 @@ The format, one tag byte per item, multi-byte fields big-endian:
 
 Fixed widths keep the tag alone enough to know what follows, so a decoder
 never resumes inside a variable-length field.
+
+This module is the reference. The optional ``cot-runsomewhere-speedups``
+distribution provides the same codec in C, as ``_cot_runsomewhere_speedups``;
+`encode` and `decode` use it when it is installed and its FORMAT matches,
+unless ``COT_RUNSOMEWHERE_PURE`` is set in the environment.
 """
 
 from __future__ import annotations
 
+import os
 import struct
 from collections.abc import Callable
 from typing import Any
+
+#: the version of the format below; the C codec must report the same
+FORMAT = 1
 
 #: how many containers and extensions may enclose an item, on both sides:
 #: the same limit for every implementation, so none accepts what another
@@ -81,7 +90,7 @@ class DecodeError(ValueError):
 # -- encoding -------------------------------------------------------------------
 
 
-def encode(value: object, default: Default | None = None) -> bytes:
+def py_encode(value: object, default: Default | None = None) -> bytes:
     """Encode a sendable value; raise TypeError for anything else."""
     out = bytearray()
     _encode(value, out, default, 0)
@@ -175,7 +184,7 @@ _Reader = Callable[[bytes, int, int, "ExtHook | None", int], tuple[Any, int]]
 _READERS: list[_Reader | None] = [None] * 256
 
 
-def decode(data: bytes, ext_hook: ExtHook | None = None) -> Any:
+def py_decode(data: bytes, ext_hook: ExtHook | None = None) -> Any:
     """Decode one value; raise DecodeError for anything malformed."""
     data = bytes(data)
     try:
@@ -351,3 +360,36 @@ def _install() -> None:
 
 
 _install()
+
+
+def _load_speedups() -> Any:
+    if os.environ.get("COT_RUNSOMEWHERE_PURE"):
+        return None
+    try:
+        import _cot_runsomewhere_speedups as speedups  # noqa: PLC0415
+    except ImportError:
+        return None
+    # a C codec for another format would garble the wire, not fail loudly
+    if getattr(speedups, "FORMAT", None) != FORMAT:
+        return None
+    return speedups
+
+
+#: the C codec in use, or None for the pure-Python one
+speedups = _load_speedups()
+
+if speedups is None:
+    encode = py_encode
+    decode = py_decode
+else:
+    _c_encode = speedups.encode
+    _c_decode = speedups.decode
+
+    def encode(value: object, default: Default | None = None) -> bytes:
+        """Encode a sendable value; raise TypeError for anything else."""
+        result: bytes = _c_encode(value, default)
+        return result
+
+    def decode(data: bytes, ext_hook: ExtHook | None = None) -> Any:
+        """Decode one value; raise DecodeError for anything malformed."""
+        return _c_decode(data, ext_hook, DecodeError)
