@@ -66,8 +66,8 @@ class WorkerCore:
         #: sync handlers still running in their threads, by a token of each call
         self._in_threads: dict[object, str] = {}
         self._running = 0
-        self._close_requested = anyio.Event()
-        self._close_deadline = 0.0
+        self._terminate_requested = anyio.Event()
+        self._terminate_deadline = 0.0
         #: when this worker stops waiting for its handlers, on the loop clock
         self._closing_at: float | None = None
         self._task_group: anyio.abc.TaskGroup | None = None
@@ -111,31 +111,31 @@ class WorkerCore:
         )
         async with anyio.create_task_group() as handlers:
             self._task_group = handlers
-            deadline = max(0.0, await self._until_close(connection) - HOP_MARGIN)
+            deadline = max(0.0, await self._until_terminate(connection) - HOP_MARGIN)
             self._closing_at = anyio.current_time() + deadline
             await self._stop_handlers(deadline)
             handlers.cancel_scope.cancel()
 
-    def request_close(self, deadline: float = 0.0) -> None:
-        """Shut down as on a gateway-close carrying ``deadline``."""
-        if not self._close_requested.is_set():
-            self._close_deadline = deadline
-            self._close_requested.set()
+    def request_terminate(self, deadline: float = 0.0) -> None:
+        """Shut down as on a gateway terminate carrying ``deadline``."""
+        if not self._terminate_requested.is_set():
+            self._terminate_deadline = deadline
+            self._terminate_requested.set()
 
-    async def _until_close(self, connection: Connection) -> float:
-        async def gateway_close() -> None:
+    async def _until_terminate(self, connection: Connection) -> float:
+        async def gateway_terminate() -> None:
             deadline = 0.0
             with contextlib.suppress(OSError):
-                frame = await connection.next_control(FrameType.GATEWAY_CLOSE)
+                frame = await connection.next_control(FrameType.GATEWAY_TERMINATE)
                 if frame.payload:
                     deadline = decode(frame.payload).get("deadline") or 0.0
-            self.request_close(deadline)
+            self.request_terminate(deadline)
 
         async with anyio.create_task_group() as waiting:
-            waiting.start_soon(gateway_close)
-            await self._close_requested.wait()
+            waiting.start_soon(gateway_terminate)
+            await self._terminate_requested.wait()
             waiting.cancel_scope.cancel()
-        return self._close_deadline
+        return self._terminate_deadline
 
     def _leaf_budget(self, leaf: Teardown) -> Callable[[], float]:
         def budget() -> float:

@@ -25,7 +25,7 @@ class FrameType(enum.IntEnum):
     DATA = 4
     CREDIT = 5
     CLOSE = 6
-    GATEWAY_CLOSE = 7
+    GATEWAY_TERMINATE = 7
     STOP = 8
     GATEWAY_STOP = 9
 

@@ -372,7 +372,8 @@ class Connection:
         )
         self.failure: WorkerGone | None = None
         self.gone = anyio.Event()
-        #: after a gateway stop, from either side, no channel is created
+        #: after a gateway stop, the worker refuses new service calls; channels
+        #: are still created, since a stopping service may need them
         self.stopping = False
         self._outgoing_send.send_nowait(PREAMBLE)
 
@@ -381,9 +382,6 @@ class Connection:
     def new_channel(self) -> Channel:
         if self.failure is not None:
             raise self.failure
-        if self.stopping:
-            msg = "the gateway is stopping: no new channels"
-            raise StateError(msg)
         channel = Channel(self, self._next_id)
         self._next_id += 2
         self._channels[channel.id] = channel
@@ -467,7 +465,7 @@ class Connection:
 
     def _dispatch(self, frame: Frame) -> None:
         kind = frame.type
-        if kind in (FrameType.HELLO, FrameType.CONFIG, FrameType.GATEWAY_CLOSE):
+        if kind in (FrameType.HELLO, FrameType.CONFIG, FrameType.GATEWAY_TERMINATE):
             self._control_send.send_nowait(frame)
         elif kind == FrameType.GATEWAY_STOP:
             self.stopping = True
@@ -477,7 +475,9 @@ class Connection:
                 raise FrameError(msg)
             opened = self._channel_for(frame.channel)
             if self.stopping:
-                opened.close(error=StateError("the gateway is stopping"))
+                opened.close(
+                    error=StateError("the gateway is stopping: no new service calls")
+                )
                 return
             self._on_open(opened, frame.payload)
         elif kind == FrameType.DATA:

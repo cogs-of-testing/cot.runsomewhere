@@ -33,7 +33,7 @@ async def _close_on_sigterm(worker: WorkerCore) -> None:
     # drain, instead of leaving it orphaned
     with anyio.open_signal_receiver(signal.SIGTERM) as signals:
         async for _ in signals:
-            worker.request_close(0.0)
+            worker.request_terminate(0.0)
 
 
 def worker(arguments: argparse.Namespace) -> None:

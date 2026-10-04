@@ -107,13 +107,21 @@ class Group:
         services: Mapping[str, bool] | None = None,
         deploy: Any = None,
         teardown: Teardown | None = None,
+        through: Gateway | None = None,
     ) -> _Spawn:
         """Start a worker at ``place``; ``teardown`` overrides the targets the
-        group's shutdown policy gives it."""
+        group's shutdown policy gives it. ``through`` names a gateway the new
+        worker depends on without being tunnelled through it, such as one
+        whose forwarded port it is reached by: that gateway is torn down after
+        the new one."""
         if deploy is not None:
             msg = "deploying on spawn is not implemented yet"
             raise StateError(msg)
-        return _Spawn(self, place, place.launch, services, teardown)
+        proxy = None
+        if through is not None:
+            proxy = through._spawn_scope
+            proxy.proxy = True
+        return _Spawn(self, place, place.launch, services, teardown, proxy=proxy)
 
     def _tasks(self) -> anyio.abc.TaskGroup:
         if self._task_group is None or self._closed:
@@ -237,8 +245,8 @@ class _Open(Generic[OpenedT]):
 
 
 async def _stop_left_open(connection: Connection, until: float) -> None:
-    """The stop phase of a gateway's shutdown: no new channels from either
-    side, and every channel still open is stopped and drained."""
+    """The stop phase of a gateway's shutdown: the worker takes no new
+    service calls, and every channel still open is stopped and drained."""
     connection.stopping = True
     connection.send_frame(FrameType.GATEWAY_STOP, 0)
     # tunnels are edges of the teardown graph, torn down with their leaves
@@ -393,7 +401,7 @@ class _Spawn:
         connection = self._connection
         healthy = graceful and connection is not None and connection.failure is None
         if not healthy:
-            # without a gateway-close, the end of the stream is what tells the
+            # without a gateway terminate, the end of the stream is what tells the
             # worker to go
             self._connection_scope.cancel()
         policy = self._group.shutdown
@@ -409,7 +417,7 @@ class _Spawn:
                     await _stop_left_open(connection, start + targets.stop)
                     remaining = max(0.0, end - anyio.current_time())
                     connection.send_frame(
-                        FrameType.GATEWAY_CLOSE, 0, encode({"deadline": remaining})
+                        FrameType.GATEWAY_TERMINATE, 0, encode({"deadline": remaining})
                     )
                 if connection is not None:
                     await connection.gone.wait()

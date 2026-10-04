@@ -11,8 +11,8 @@ class Teardown:
     """One worker's soft targets, in seconds.
 
     ``stop`` bounds its gateway's stop phase, in which channels left open are
-    stopped and drained; ``drain`` bounds the time from the gateway-close
-    until the worker has exited. Past them, the place forces the worker.
+    stopped and drained; ``drain`` bounds the time from the gateway
+    terminate until the worker has exited. Past them, the place forces the worker.
     """
 
     stop: float = 2.5

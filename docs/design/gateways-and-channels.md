@@ -56,10 +56,10 @@ launch ─► handshake ─► configure ─► serve ─► close ─► closed
    disposition, enabled services, event loop. Configuration never travels
    in argv, where `ps` and `/proc` would show it.
 4. **Serve.** Channels open and close; services run.
-5. **Close.** Leaving the `spawn` block asks the worker to shut down. The
-   worker stops its running services, drains and closes their channels, and
-   exits. If it has not done so by the deadline, the place forces it
-   ([shutdown](#shutdown)).
+5. **Close.** Leaving the `spawn` block shuts the worker down in two steps
+   ([shutdown](#shutdown)). A gateway stop ends new service calls and stops
+   the running ones. A gateway terminate then ends the communication, and the
+   worker exits. If it has not done so by the deadline, the place forces it.
 6. **Gone.** On EOF or a transport error at any point, every open channel
    fails with `WorkerGone`, and the gateway is closed. Nothing reconnects;
    a new worker is a new spawn.
@@ -67,8 +67,8 @@ launch ─► handshake ─► configure ─► serve ─► close ─► closed
 A gateway belongs to exactly one group, and its `spawn` block always ends
 inside the group's. Scopes nest, so a worker spawned through another is closed
 before the one it runs through. If a group's scope is cancelled or fails, it
-closes whatever gateways are still open, concurrently where the
-[teardown graph](#shutdown) allows.
+closes whatever gateways are still open, concurrently where their
+[dependents](#dependents) allow.
 
 ### Shutdown
 
@@ -94,10 +94,28 @@ what enforces it is the caller, which closes the channel when it passes. A
 handler that ignores its stop is closed like any other. A stop for a handler
 that already returned is ignored, since that race is normal.
 
-Either side creates channels: the worker makes them with `channel.new()` and
-sends them back. A gateway's stop is therefore a frame of its own, not only
-a stop per channel: after it, neither side creates channels, and creating one
-raises `StateError`. Every channel open at that point is then stopped.
+A gateway has two messages of its own, a stop and a terminate:
+
+- **Gateway stop** ends new service calls: an open that reaches the worker
+  after it is refused with `StateError`. It does not end channel creation.
+  A service that is shutting down may still need channels for that, to hand
+  back logs or a final report, so `channel.new()` keeps working. The worker
+  then stops its running service calls, and answers the stop
+  ([dependents](#dependents)).
+- **Gateway terminate** ends the communication. Nothing is sent after it in
+  either direction, every channel still open fails, and the worker exits
+  within the deadline the terminate carries. It cascades: a worker that is
+  terminated terminates its dependents before it exits.
+
+The names follow POSIX signals on purpose, and differ from them on purpose.
+`SIGSTOP` suspends a process, cannot be caught, and is undone by `SIGCONT`.
+A gateway stop suspends nothing and is not undone: it asks the services to
+finish, which is closer to what `SIGTERM` asks of a process. A gateway
+terminate is closer to `SIGKILL`, but only for the communication: the worker
+still runs its own exit, and the place's force steps (`SIGTERM`, then
+`SIGKILL`) are what remains if it does not. The words were chosen for what a
+caller does, stop a service and terminate a link, not to mirror the signal
+table.
 
 Every node that shuts down passes through the same phases:
 
@@ -116,43 +134,76 @@ The place owns the force steps, because only it knows whether its worker can
 be terminated or killed at all. The caller owns the timings, through a
 shutdown policy, `rsh.Shutdown`. Each worker has targets of its own, an
 `rsh.Teardown`: `stop`, how long its gateway's stop phase may take, and
-`drain`, how long it gets from the gateway-close to exit. The policy holds
-one for edge workers and one for proxies, and a spawn overrides them with
-`teardown=`. The targets are soft deadlines: each bounds its own node's
+`drain`, how long it gets from the gateway terminate to exit. The policy
+holds one for edge workers and one for proxies, and a spawn overrides them
+with `teardown=`. The targets are soft deadlines: each bounds its own node's
 wait, and nothing above caps a subtree. Hard deadlines, a cap on a whole
 subtree, need more detail than that and are left for later. A cancelled
 scope, and an engine stopped because its process exits, skip the waits and
 go straight to force: a cancellation shortens the wait, it never leaves a
 worker running.
 
-**The teardown graph.** Workers that others depend on are proxies: a relay
-with gateways tunnelled through it ([relaying](relaying.md)), and a worker
-carrying `rsh.proxy` connections. The edges of the graph are those tunnel
-channels and proxy connections; no other channel is part of it. An edge
-worker has no dependents. A proxy is torn down only after its dependents,
-and everything the graph does not order is torn down concurrently: sibling
-dependents, separate subtrees, the groups of an engine, the channels of a
-stop phase.
+#### Dependents
 
-The caller drives the graph: it spawned every worker in it and holds every
-target. Tearing down a proxy whose dependents are still open tears those
-down first, through their own spawns, from the leaves up. When the caller
-cannot drive, because a relay was sent SIGTERM or the link to it was lost,
-the relay falls back on what it knows: it ends each tunnel, gives the leaf
-the targets the caller sent when it opened the tunnel, and then has the place
-force it. A worker that is sent SIGTERM shuts down with no time of its own
-to drain, so a terminated relay does not orphan what runs behind it.
+A worker that others depend on is a proxy. A dependent is always another
+worker, and the dependency is a property of its spawn:
+
+- **Tunnelled:** a worker spawned with `gateway.spawn` runs through that
+  gateway's `rsh.via` ([relaying](relaying.md)).
+- **Declared:** a worker the engine cannot see the dependency of, such as
+  one reached through a port that `rsh.proxy` forwards, is spawned with
+  `group.spawn(place, through=gateway)`.
+
+A proxy is stopped only after its dependents, and everything that is not
+ordered that way is stopped concurrently: sibling dependents, separate
+subtrees, the groups of an engine, the service calls of a stop phase.
+
+Workers keep no map of these dependencies; they stay dumb. The engine keeps
+it, as a tree of the spawns it made, and drives the shutdown from it. It
+holds the tree before any shutdown starts, so a worker that no longer
+answers cannot hide what runs behind it. Service calls are not part of it: a
+connection `rsh.proxy` carries for someone else is not the engine's to stop,
+and the call's `stop` target bounds it.
+
+**Proposed:** once `rsh.proxy` exists, `through=` takes the object that
+carries the dependency, such as the forward that `gateway.forward` yields,
+rather than the whole gateway. Via and proxy then name the same thing the
+tree records, and a forward closed early fails only what was spawned through
+it.
+
+A gateway's shutdown runs in the engine:
+
+1. Its dependents are shut down first, concurrently, each through its own
+   spawn, which repeats these steps. The tree is walked from the leaves up.
+2. The engine sends the gateway stop. The worker refuses new service calls
+   from then on, and does nothing else on its own.
+3. The engine stops the service calls still open, concurrently, and waits
+   for them to close, drained.
+4. It sends the gateway terminate, and the worker exits. If a stop fails,
+   by error or by its `stop` target passing, the terminate follows at once.
+
+**Terminate cascades.** A terminate comes only after a stop has failed, so
+it may tear down whatever is left without care for order: direct and
+indirect dependents alike. A worker that is terminated terminates its
+dependents before it exits. A relay ends each tunnel, which the leaf takes as
+a terminate, gives the leaf the targets the caller sent when it opened the
+tunnel, and has the place force it if it overruns. The leaf does the same for
+its own dependents. This is also what happens when the engine cannot drive,
+because a relay was sent `SIGTERM` or the link to it was lost: a worker that
+is sent `SIGTERM`, or whose stream ends, takes it as a gateway terminate with
+no time of its own to drain. A terminated relay therefore does not orphan
+what runs behind it.
 
 Three kinds of shutdown cascade differently:
 
 - **A channel** that closes stops its handler on the far side. An async
   handler waiting on the channel sees the close; one busy elsewhere is
   cancelled. A sync handler sees it on its next channel operation.
-- **A gateway** sends its gateway stop, stops every open channel, drains and
-  closes them, then sends the gateway-close and has the place force the
-  worker if it overruns. The tunnel channels of [relayed](relaying.md)
-  gateways are internals of the gateway, not channels a caller opened: they
-  follow the graph, never a channel's shutdown.
+- **A gateway** shuts down its dependents, sends its gateway stop, stops
+  its service calls and waits for them to close, drained. Then it sends the
+  gateway terminate, and has the place force the worker if it overruns. The tunnel channels of
+  [relayed](relaying.md) gateways are internals of the gateway, not channels
+  a caller opened: they follow the tree, never a channel's shutdown.
 - **An engine** shuts down every group still open, then stops its event loop
   and its thread or subinterpreter. It is stopped when the managing
   process's main thread exits, without an `atexit` hook: its host thread is
@@ -163,14 +214,16 @@ Three kinds of shutdown cascade differently:
 A channel the caller left open when its gateway, group or engine shuts down
 is drained as part of that shutdown, and the facades emit a `ResourceWarning`
 naming it. A channel left by its own block is closed, and drained, as asked:
-nothing to warn about.
+nothing to warn about. Channels a service created with `channel.new()` belong
+to that service call and end with it. One still open at the gateway terminate
+fails, and is reported the same way.
 
-Open:
-
-- How a gateway stop races a channel created and sent just before it.
-  HTTP/2's GOAWAY settles the same race by naming the last stream it will
-  serve; channel ids are allocated per side, so the gateway stop could name
-  the last id of each.
+The stop phase only waits for service calls, which only the caller opens.
+Since the caller is also the side that sends the gateway stop, no open can
+race it. A channel created with `channel.new()` around the stop is allowed
+either way, so it cannot race the stop either. This settles
+https://github.com/cogs-of-testing/cot.runsomewhere/issues/13 without naming
+the last channel id.
 
 ### Output
 
@@ -297,11 +350,11 @@ been written entirely or not at all.
 
 Every frame is a fixed header and a payload:
 
-| Field   | Size    | Meaning                                                                                                   |
-| ------- | ------- | --------------------------------------------------------------------------------------------------------- |
-| type    | 1 byte  | hello, config, open, data, credit, close (with the directions it ends), stop, gateway-stop, gateway-close |
-| channel | 4 bytes | channel id; 0 for gateway-level frames                                                                    |
-| length  | 4 bytes | payload length                                                                                            |
+| Field   | Size    | Meaning                                                                                                       |
+| ------- | ------- | ------------------------------------------------------------------------------------------------------------- |
+| type    | 1 byte  | hello, config, open, data, credit, close (with the directions it ends), stop, gateway-stop, gateway-terminate |
+| channel | 4 bytes | channel id; 0 for gateway-level frames                                                                        |
+| length  | 4 bytes | payload length                                                                                                |
 
 The decoder is sans-IO: it takes bytes and yields frames, never reads or
 waits, so every transport and every event loop uses the same one.

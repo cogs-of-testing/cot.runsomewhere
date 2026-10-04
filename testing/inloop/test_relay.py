@@ -76,3 +76,18 @@ async def test_a_relay_resolves_place_kinds_by_entry_point_name(gateway):
     with pytest.raises(rsh.WorkerGone, match=re.escape("'nowhere'")):
         async with gateway.spawn(Nowhere()):
             pytest.fail("a place kind nobody declared must not yield a gateway")
+
+
+async def test_a_worker_spawned_through_another_gateway_is_torn_down_before_it():
+    # reached through a forwarded port, say: no tunnel, but the dependency
+    # still orders the teardown, however the blocks are left
+    async with rsh.open_group() as group:
+        proxy_scope = group.spawn(rsht.InLoop())
+        proxy = await proxy_scope.__aenter__()
+        dependent_scope = group.spawn(rsht.InLoop(), through=proxy)
+        dependent = await dependent_scope.__aenter__()
+        await proxy_scope.__aexit__(None, None, None)
+        with pytest.raises(rsh.StateError):
+            async with dependent.open("rsh_test_services.echo"):
+                pass
+        await dependent_scope.__aexit__(None, None, None)
