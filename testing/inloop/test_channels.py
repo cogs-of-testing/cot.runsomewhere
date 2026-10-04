@@ -5,7 +5,7 @@ import pytest
 
 from cot import runsomewhere as rsh
 from cot.runsomewhere import testing as rsht
-from cot.runsomewhere._frames import Frame, FrameType, encode_frame
+from cot.runsomewhere._frames import encode_frame
 from cot.runsomewhere._values import encode
 from cot.runsomewhere.testing import open_inloop
 
@@ -114,8 +114,8 @@ async def test_open_is_only_a_context_manager(gateway):
 
 def _half_close_from_caller(pipe, channel, ends):
     # no public half-close yet: the frame a caller would send, put on the wire
-    frame = Frame(FrameType.CLOSE, channel.id, encode({"ends": ends}))
-    pipe.inject(encode_frame(frame), to="worker")
+    close = encode({"op": "close", "channel": channel.id, "ends": ends})
+    pipe.inject(encode_frame(0, close), to="worker")
 
 
 async def test_the_result_still_arrives_after_the_caller_ends_its_sending():
@@ -387,7 +387,7 @@ async def test_a_stopping_service_still_creates_channels():
 
     async with open_inloop(services={"t.report": report_on_stop}) as gateway:
         async with gateway.open("t.report") as channel:
-            gateway._connection.send_frame(FrameType.GATEWAY_STOP, 0)
+            gateway._connection.send_control("gateway-stop")
             channel.stop()
             with anyio.fail_after(1):
                 report = await channel.receive()
@@ -396,7 +396,7 @@ async def test_a_stopping_service_still_creates_channels():
 
 
 async def test_a_service_call_after_the_gateway_stop_is_refused(gateway):
-    gateway._connection.send_frame(FrameType.GATEWAY_STOP, 0)
+    gateway._connection.send_control("gateway-stop")
     async with gateway.open("rsh_test_services.echo") as channel:
         with anyio.fail_after(1), pytest.raises(rsh.RemoteError, match="stopping"):
             await channel.wait_closed()

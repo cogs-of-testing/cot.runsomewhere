@@ -2,7 +2,7 @@
 # /// script
 # dependencies = ["nox>=2025"]
 # ///
-"""Task runner: ``nox -s tests``, ``nox -s lint``, ``nox -s docs``."""
+"""Task runner: ``nox -s tests``, ``nox -s bench``, ``nox -s lint``, ``nox -s docs``."""
 
 import nox
 
@@ -23,6 +23,20 @@ def tests(session: nox.Session) -> None:
         env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
     )
     session.run("pytest", *session.posargs)
+
+
+@nox.session(python=PYTHONS)
+def bench(session: nox.Session) -> None:
+    session.run_install(
+        "uv",
+        "sync",
+        "--frozen",
+        "--group=test",
+        "--group=bench",
+        f"--python={session.virtualenv.location}",
+        env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
+    )
+    session.run("pytest", "benchmarks", "--benchmark-autosave", *session.posargs)
 
 
 @nox.session

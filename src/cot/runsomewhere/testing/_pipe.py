@@ -12,6 +12,8 @@ class _Direction:
         self.buffer = bytearray()
         self.eof = False
         self.changed: anyio.Event | None = None
+        #: everything written this way, when the pipe records
+        self.record: bytearray | None = None
 
     def wake(self) -> None:
         if self.changed is not None:
@@ -24,10 +26,13 @@ class Pipe:
     It carries the full protocol, and is where a test injects faults.
     """
 
-    def __init__(self, *, max_chunk: int | None = None) -> None:
+    def __init__(self, *, max_chunk: int | None = None, record: bool = False) -> None:
         self.max_chunk = max_chunk
         self._to_worker = _Direction()
         self._to_caller = _Direction()
+        if record:
+            self._to_worker.record = bytearray()
+            self._to_caller.record = bytearray()
         self._held = False
         self._cut = False
         self.caller_end = _End(self, incoming=self._to_caller, outgoing=self._to_worker)
@@ -46,6 +51,14 @@ class Pipe:
         """End the stream on both sides, as a dead worker or dropped link would."""
         self._cut = True
         self._wake()
+
+    def recorded(self, *, to: str) -> bytes:
+        """Every byte written toward one side so far; needs ``record=True``."""
+        direction = {"caller": self._to_caller, "worker": self._to_worker}[to]
+        if direction.record is None:
+            msg = "this pipe does not record: create it with record=True"
+            raise ValueError(msg)
+        return bytes(direction.record)
 
     def inject(self, data: bytes, *, to: str) -> None:
         """Deliver raw bytes to one side as if the other side had written them."""
@@ -70,6 +83,8 @@ class _End(anyio.abc.ByteStream):
             msg = "the pipe is cut"
             raise anyio.BrokenResourceError(msg)
         self._outgoing.buffer += item
+        if self._outgoing.record is not None:
+            self._outgoing.record += item
         self._outgoing.wake()
 
     async def receive(self, max_bytes: int = 65536) -> bytes:

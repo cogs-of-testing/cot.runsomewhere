@@ -17,13 +17,11 @@ import anyio.to_thread
 from . import _remote_exec
 from ._channels import Channel, Connection
 from ._errors import HandshakeRefused
-from ._frames import FrameType
 from ._handshake import Hello, check_peer
 from ._places import place_from_value
 from ._shutdown import Teardown
 from ._thread_channel import ThreadChannel
 from ._tunnel import relay
-from ._values import decode, encode
 from ._version import version as __version__
 
 SERVICE_GROUP = "cot.runsomewhere.services"
@@ -87,17 +85,17 @@ class WorkerCore:
                 self._warn_abandoned()
 
     async def _serve(self, connection: Connection) -> None:
-        connection.send_frame(FrameType.HELLO, 0, encode(self._hello.to_value()))
+        connection.send_control("hello", **self._hello.to_value())
         try:
-            config = decode((await connection.next_control(FrameType.CONFIG)).payload)
-        except OSError:
+            config = (await connection.next_control("config"))["config"]
+        except (OSError, KeyError):
             return
+        remote = Hello.from_value(config["hello"])
+        connection.peer = f"the caller at pid {remote.pid} ({remote.version})"
         try:
-            check_peer(local=self._hello, remote=Hello.from_value(config["hello"]))
+            check_peer(local=self._hello, remote=remote)
         except HandshakeRefused as refused:
-            connection.send_frame(
-                FrameType.CONFIG, 0, encode({"ok": False, "error": str(refused)})
-            )
+            connection.send_control("config", ok=False, error=str(refused))
             return
         os.environ.update(config.get("env") or {})
         requested: dict[str, bool] = config.get("services") or {}
@@ -106,9 +104,7 @@ class WorkerCore:
             for name in self._hello.services
             if requested.get(name, BUILTINS.get(name, True))
         )
-        connection.send_frame(
-            FrameType.CONFIG, 0, encode({"ok": True, "services": self._enabled})
-        )
+        connection.send_control("config", ok=True, services=self._enabled)
         async with anyio.create_task_group() as handlers:
             self._task_group = handlers
             deadline = max(0.0, await self._until_terminate(connection) - HOP_MARGIN)
@@ -126,9 +122,8 @@ class WorkerCore:
         async def gateway_terminate() -> None:
             deadline = 0.0
             with contextlib.suppress(OSError):
-                frame = await connection.next_control(FrameType.GATEWAY_TERMINATE)
-                if frame.payload:
-                    deadline = decode(frame.payload).get("deadline") or 0.0
+                terminate = await connection.next_control("gateway-terminate")
+                deadline = terminate.get("deadline") or 0.0
             self.request_terminate(deadline)
 
         async with anyio.create_task_group() as waiting:
@@ -162,8 +157,7 @@ class WorkerCore:
 
     # -- services -------------------------------------------------------------
 
-    def _on_open(self, channel: Channel, payload: bytes) -> None:
-        request = decode(payload, self._connection._channel_for)
+    def _on_open(self, channel: Channel, request: dict[str, Any]) -> None:
         if self._task_group is None:
             channel.close(error=RuntimeError("the worker is not serving yet"))
             return

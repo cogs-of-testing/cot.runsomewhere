@@ -3,25 +3,57 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
-import struct
 import traceback
 from collections import deque
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import anyio.abc
 from anyio.lowlevel import cancel_shielded_checkpoint, checkpoint_if_cancelled
 
+from ._control import ProtocolError, message, unknown
 from ._errors import ChannelClosed, ItemsDiscarded, RemoteError, StateError, WorkerGone
-from ._frames import PREAMBLE, Frame, FrameDecoder, FrameError, FrameType, encode_frame
+from ._frames import MAX_FIELD, PREAMBLE, Frame, FrameDecoder, FrameError, encode_frame
 from ._values import DecodeError, decode, encode
+from ._version import version as __version__
+
+log = logging.getLogger(__name__)
 
 DEFAULT_WINDOW = 1024 * 1024
-_CREDIT = struct.Struct(">I")
+#: an item larger than this goes out in fragments
+FRAGMENT = 64 * 1024
+#: the largest item, encoded; bulk data belongs in the transfer service
+MAX_ITEM = 64 * 1024 * 1024
+#: how long credit with nothing to ride on waits for a reply to carry it
+CREDIT_DELAY = 0.001
 
-OpenHandler = Callable[["Channel", bytes], None]
+OpenHandler = Callable[["Channel", dict[str, Any]], None]
+
+#: the value codec's extension code for a channel; the codec knows no more
+CHANNEL_REFERENCE = 0
+
+
+def is_channel(value: object) -> bool:
+    return getattr(type(value), "_rsh_channel", False) is True
+
+
+def _any_channel(value: object) -> tuple[int, int]:
+    if is_channel(value):
+        return CHANNEL_REFERENCE, 0
+    msg = f"cannot send {type(value).__qualname__} values: {value!r}"
+    raise TypeError(msg)
+
+
+def can_send(value: object) -> bool:
+    """Whether a value can cross a channel, checked without sending it."""
+    try:
+        encode(value, _any_channel)
+    except TypeError:
+        return False
+    return True
 
 
 class Channel:
@@ -38,13 +70,18 @@ class Channel:
         self._item_arrived: anyio.Event | None = None
         self._credit = DEFAULT_WINDOW
         self._credit_arrived: anyio.Event | None = None
-        self._unacknowledged = 0
+        #: bytes taken from the peer and not yet reported back as credit
+        self._unreported = 0
+        #: credit reported back in total, and bytes the peer sent in total:
+        #: what the peer has left to send is the window, plus the one, less
+        #: the other
+        self._reported = 0
+        self._received_bytes = 0
         #: sizes of the items sent and not yet taken, oldest first
         self._outstanding: deque[int] = deque()
         self._granted_unmatched = 0
         self._taken_by_peer = 0
         self._granted_total = 0
-        self._taken_bytes = 0
         self._closed_locally = False
         self._ended_sending = False
         self._ended_receiving = False
@@ -75,13 +112,16 @@ class Channel:
     async def send(self, value: object) -> None:
         await checkpoint_if_cancelled()
         self._raise_if_unusable()
-        payload = encode(value, self._connection.channel_id)
+        payload = self._connection.encode_value(value)
+        if len(payload) > MAX_ITEM:
+            msg = f"an item of {len(payload)} bytes is over the limit of {MAX_ITEM}"
+            raise StateError(msg)
         while self._credit <= 0:
             await self._wait_for_credit()
             self._raise_if_unusable()
         self._credit -= len(payload)
         self._outstanding.append(len(payload))
-        self._connection.send_frame(FrameType.DATA, self.id, payload)
+        self._connection.send_item(self.id, payload, self._take_unreported())
         await cancel_shielded_checkpoint()
 
     async def drain(self) -> None:
@@ -127,7 +167,6 @@ class Channel:
             finally:
                 self._receivers_waiting -= 1
         value, size = self._items.popleft()
-        self._taken_bytes += size
         self._consumed(size)
         await cancel_shielded_checkpoint()
         return value
@@ -165,8 +204,8 @@ class Channel:
         """
         if self._closed_locally or self._peer_close is not None:
             return
-        info = {} if deadline is None else {"deadline": deadline}
-        self._connection.send_frame(FrameType.STOP, self.id, encode(info))
+        fields = {} if deadline is None else {"deadline": deadline}
+        self._connection.send_control("stop", channel=self.id, **fields)
 
     @property
     def stopping(self) -> bool:
@@ -200,10 +239,10 @@ class Channel:
             self._ended_receiving = True
             self._items.clear()
         if self._peer_close is None and self._failure is None:
-            info: dict[str, Any] = {"ends": "send"}
-            if not send:
-                info = {"ends": "receive", "taken": self._taken_bytes}
-            self._connection.send_frame(FrameType.CLOSE, self.id, encode(info))
+            # the peer learns how much was taken from the credit before it
+            self._flush_credit()
+            ends = "send" if send else "receive"
+            self._connection.send_control("close", channel=self.id, ends=ends)
         self._wake()
 
     def close(
@@ -223,21 +262,20 @@ class Channel:
                 info = _error_info(error)
             elif result is not None:
                 try:
-                    encode(result, self._connection.channel_id)
+                    self._connection.encode_value(result)
                 except TypeError as unsendable:
                     info = _error_info(unsendable)
                 else:
                     info = {"result": result}
-            info["taken"] = self._taken_bytes
-            self._connection.send_frame(
-                FrameType.CLOSE, self.id, encode(info, self._connection.channel_id)
-            )
+            self._flush_credit()
+            self._connection.send_control("close", channel=self.id, **info)
         self._connection.forget(self)
         self._wake()
 
     # -- driven by the connection ---------------------------------------------
 
     def _deliver(self, value: Any, size: int) -> None:
+        self._received_bytes += size
         if self._ended_receiving:
             return
         self._items.append((value, size))
@@ -260,9 +298,6 @@ class Channel:
 
     def _closed_by_peer(self, info: dict[str, Any]) -> None:
         ends = info.pop("ends", None)
-        # taken but not yet granted back, since credit goes out in batches
-        taken = info.pop("taken", self._granted_total)
-        self._match_taken(max(0, taken - self._granted_total))
         self._peer_ended_sending |= ends in (None, "send")
         self._peer_ended_receiving |= ends in (None, "receive")
         if ends is not None:
@@ -280,6 +315,7 @@ class Channel:
             self.handler_scope.cancel()
 
     def _stopped_by_peer(self, info: dict[str, Any]) -> None:
+        self._flush_credit()
         if "deadline" in info:
             self.stop_deadline = anyio.current_time() + info["deadline"]
         self._stop_requested.set()
@@ -301,12 +337,23 @@ class Channel:
         # the peer learns what was taken
         if self._ended_receiving or self._peer_close is not None:
             return
-        self._unacknowledged += size
-        if self._unacknowledged >= DEFAULT_WINDOW // 4 or not self._items:
-            self._connection.send_frame(
-                FrameType.CREDIT, self.id, _CREDIT.pack(self._unacknowledged)
-            )
-            self._unacknowledged = 0
+        self._unreported += size
+        peer_left = self._reported + DEFAULT_WINDOW - self._received_bytes
+        if self._unreported >= DEFAULT_WINDOW // 4 or peer_left < DEFAULT_WINDOW // 4:
+            # never hold credit a sender may be blocked on
+            self._flush_credit()
+        elif not self._items:
+            self._connection.credit_pending(self)
+
+    def _take_unreported(self) -> int:
+        taken, self._unreported = self._unreported, 0
+        self._reported += taken
+        return taken
+
+    def _flush_credit(self) -> None:
+        taken = self._take_unreported()
+        if taken:
+            self._connection.send_frame(self.id, b"", taken)
 
     def _close_result(self) -> Any:
         assert self._peer_close is not None
@@ -367,9 +414,15 @@ class Connection:
         self._outgoing_send, self._outgoing = anyio.create_memory_object_stream[bytes](
             math.inf
         )
-        self._control_send, self.control = anyio.create_memory_object_stream[Frame](
-            math.inf
-        )
+        self._control_send, self.control = anyio.create_memory_object_stream[
+            dict[str, Any]
+        ](math.inf)
+        #: channels holding credit with nothing yet to carry it
+        self._credit_waiting: dict[int, Channel] = {}
+        #: fragments of the item in progress, by channel
+        self._fragments: dict[int, list[bytes]] = {}
+        #: the other side, as warnings name it; set once the handshake is done
+        self.peer = "the other side"
         self.failure: WorkerGone | None = None
         self.gone = anyio.Event()
         #: after a gateway stop, the worker refuses new service calls; channels
@@ -382,6 +435,9 @@ class Connection:
     def new_channel(self) -> Channel:
         if self.failure is not None:
             raise self.failure
+        if self._next_id > MAX_FIELD:
+            msg = "this gateway has used up its channel ids"
+            raise StateError(msg)
         channel = Channel(self, self._next_id)
         self._next_id += 2
         self._channels[channel.id] = channel
@@ -394,13 +450,30 @@ class Connection:
     def forget(self, channel: Channel) -> None:
         self._channels.pop(channel.id, None)
 
-    def channel_id(self, channel: Any) -> int:
+    def encode_value(self, value: object) -> bytes:
+        """Encode a value for this connection: channels in it become references
+        the peer resolves to its end of each."""
+        return encode(value, self._channel_reference)
+
+    def decode_value(self, payload: bytes) -> Any:
+        return decode(payload, self._resolve_reference)
+
+    def _channel_reference(self, value: object) -> tuple[int, int]:
+        if not is_channel(value):
+            msg = f"cannot send {type(value).__qualname__} values: {value!r}"
+            raise TypeError(msg)
         # a sync handler holds its channels wrapped for its thread
-        unwrapped: Channel = getattr(channel, "async_channel", channel)
+        unwrapped = cast("Channel", getattr(value, "async_channel", value))
         if unwrapped._connection is not self:
             msg = f"{unwrapped!r} belongs to another gateway"
             raise StateError(msg)
-        return unwrapped.id
+        return CHANNEL_REFERENCE, unwrapped.id
+
+    def _resolve_reference(self, code: int, channel_id: Any) -> Channel:
+        if code != CHANNEL_REFERENCE or type(channel_id) is not int:
+            msg = f"unknown extension {code} with {channel_id!r}"
+            raise DecodeError(msg)
+        return self._channel_for(channel_id)
 
     def _channel_for(self, channel_id: int) -> Channel:
         channel = self._channels.get(channel_id)
@@ -411,14 +484,56 @@ class Connection:
 
     # -- frames ---------------------------------------------------------------
 
-    def send_frame(self, kind: FrameType, channel: int, payload: bytes = b"") -> None:
+    def send_frame(self, channel: int, payload: bytes = b"", taken: int = 0) -> None:
         if self.failure is not None:
             return
         with contextlib.suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
-            self._outgoing_send.send_nowait(encode_frame(Frame(kind, channel, payload)))
+            self._outgoing_send.send_nowait(encode_frame(channel, payload, taken))
+
+    def send_item(self, channel: int, payload: bytes, taken: int = 0) -> None:
+        """Queue one encoded item, in fragments when it is large; the first
+        frame carries the credit."""
+        if self.failure is not None:
+            return
+        frames = []
+        for start in range(0, len(payload), FRAGMENT):
+            end = start + FRAGMENT
+            frames.append(
+                encode_frame(
+                    channel, payload[start:end], taken, more=end < len(payload)
+                )
+            )
+            taken = 0
+        with contextlib.suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
+            # queued together: no other frame on this channel comes between
+            self._outgoing_send.send_nowait(b"".join(frames))
+
+    def send_control(self, op: str, **fields: Any) -> None:
+        self.send_item(0, self.encode_value(message(op, **fields)))
+
+    def credit_pending(self, channel: Channel) -> None:
+        """Hold the channel's credit until a frame can carry it, or until the
+        writer would otherwise go idle for `CREDIT_DELAY`."""
+        if self.stopping:
+            channel._flush_credit()
+            return
+        if not self._credit_waiting:
+            # an idle writer waits for frames, not for credit: an empty chunk
+            # wakes it to start the delay
+            with contextlib.suppress(
+                anyio.ClosedResourceError, anyio.BrokenResourceError
+            ):
+                self._outgoing_send.send_nowait(b"")
+        self._credit_waiting[channel.id] = channel
+
+    def _flush_waiting_credit(self) -> None:
+        waiting, self._credit_waiting = self._credit_waiting, {}
+        for channel in waiting.values():
+            channel._flush_credit()
 
     def finish_sending(self) -> None:
         """Close the stream once everything queued so far is written."""
+        self._flush_waiting_credit()
         self._outgoing_send.close()
 
     async def run(self) -> None:
@@ -440,11 +555,45 @@ class Connection:
 
     async def _write(self) -> None:
         try:
-            async for data in self._outgoing:
-                await self._stream.send(data)
-            await self._stream.send_eof()
+            while True:
+                chunks = self._queued()
+                if not chunks:
+                    chunks = await self._next_chunks()
+                data = b"".join(chunks)
+                if data:
+                    await self._stream.send(data)
+        except anyio.EndOfStream:
+            with contextlib.suppress(
+                anyio.BrokenResourceError, anyio.ClosedResourceError, OSError
+            ):
+                await self._stream.send_eof()
         except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
             pass
+
+    def _queued(self) -> list[bytes]:
+        """Everything queued now, to go out in one write."""
+        chunks: list[bytes] = []
+        try:
+            while True:
+                chunks.append(self._outgoing.receive_nowait())
+        except anyio.WouldBlock:
+            return chunks
+        except anyio.EndOfStream:
+            if chunks:
+                return chunks
+            raise
+
+    async def _next_chunks(self) -> list[bytes]:
+        """Wait for something to write; credit waiting for a reply to ride on
+        goes out on its own once the writer has been idle for CREDIT_DELAY."""
+        while self._credit_waiting:
+            with anyio.move_on_after(CREDIT_DELAY):
+                return [await self._outgoing.receive()]
+            self._flush_waiting_credit()
+            chunks = self._queued()
+            if chunks:
+                return chunks
+        return [await self._outgoing.receive()]
 
     async def _read(self) -> None:
         while True:
@@ -459,51 +608,95 @@ class Connection:
             try:
                 for frame in self._decoder.feed(data):
                     self._dispatch(frame)
-            except (FrameError, DecodeError) as error:
+            except (FrameError, DecodeError, ProtocolError) as error:
                 self._set_gone(f"invalid frame stream: {error}")
                 return
 
     def _dispatch(self, frame: Frame) -> None:
-        kind = frame.type
-        if kind in (FrameType.HELLO, FrameType.CONFIG, FrameType.GATEWAY_TERMINATE):
-            self._control_send.send_nowait(frame)
-        elif kind == FrameType.GATEWAY_STOP:
+        if frame.taken:
+            channel = self._channels.get(frame.channel)
+            if channel is not None:
+                channel._grant(frame.taken)
+        if frame.abort:
+            self._fragments.pop(frame.channel, None)
+            return
+        if frame.more:
+            parts = self._fragments.setdefault(frame.channel, [])
+            parts.append(frame.payload)
+            if sum(map(len, parts)) > MAX_ITEM:
+                msg = f"an item on channel {frame.channel} is over {MAX_ITEM} bytes"
+                raise FrameError(msg)
+            return
+        payload = frame.payload
+        earlier = self._fragments.pop(frame.channel, None)
+        if earlier is not None:
+            payload = b"".join([*earlier, payload])
+        elif not payload:
+            return  # credit only
+        if frame.channel == 0:
+            self._on_control(self.decode_value(payload))
+            return
+        channel = self._channels.get(frame.channel)
+        if channel is not None:
+            channel._deliver(self.decode_value(payload), len(payload))
+
+    def _on_control(self, value: Any) -> None:
+        not_understood = unknown(value)
+        if not_understood is not None:
+            self._not_understood(value, not_understood)
+            return
+        op = value.pop("op")
+        if op in ("hello", "config", "gateway-terminate"):
+            self._control_send.send_nowait({"op": op, **value})
+        elif op == "gateway-stop":
             self.stopping = True
-        elif kind == FrameType.OPEN:
+            self._flush_waiting_credit()
+        elif op == "open":
             if self._on_open is None:
                 msg = "the caller was asked to open a channel"
-                raise FrameError(msg)
-            opened = self._channel_for(frame.channel)
+                raise ProtocolError(msg)
+            opened = self._channel_for(value["channel"])
             if self.stopping:
                 opened.close(
                     error=StateError("the gateway is stopping: no new service calls")
                 )
                 return
-            self._on_open(opened, frame.payload)
-        elif kind == FrameType.DATA:
-            channel = self._channels.get(frame.channel)
-            if channel is not None:
-                channel._deliver(
-                    decode(frame.payload, self._channel_for), len(frame.payload)
-                )
-        elif kind == FrameType.CREDIT:
-            channel = self._channels.get(frame.channel)
-            if channel is not None:
-                channel._grant(int(_CREDIT.unpack(frame.payload)[0]))
-        elif kind == FrameType.STOP:
+            self._on_open(opened, value)
+        elif op == "stop":
             # a stop for a channel already closed found its work done
-            channel = self._channels.get(frame.channel)
+            channel = self._channels.get(value["channel"])
             if channel is not None:
-                channel._stopped_by_peer(decode(frame.payload))
-        elif kind == FrameType.CLOSE:
-            channel = self._channels.get(frame.channel)
+                channel._stopped_by_peer(value)
+        elif op == "close":
+            channel_id = value.pop("channel")
+            channel = self._channels.get(channel_id)
             if channel is not None:
-                info = decode(frame.payload, self._channel_for)
                 # a half-closed channel stays routed: its full close, with the
                 # result or error, is still to come
-                if "ends" not in info:
-                    del self._channels[frame.channel]
-                channel._closed_by_peer(info)
+                if "ends" not in value:
+                    del self._channels[channel_id]
+                channel._closed_by_peer(value)
+
+    def _not_understood(self, value: dict[str, Any], what: str) -> None:
+        """A newer peer may send what this side does not know: only the channel
+        the message names fails, on both sides, and the gateway goes on."""
+        channel_id = value.get("channel")
+        named = f" on channel {channel_id}" if type(channel_id) is int else ""
+        log.warning(
+            "%s sent %s, which runsomewhere %s does not know%s",
+            self.peer,
+            what,
+            __version__,
+            named,
+        )
+        if type(channel_id) is not int:
+            return
+        channel = self._channels.get(channel_id)
+        if channel is None:
+            return
+        error = StateError(f"{self.peer} sent {what}, which this side does not know")
+        channel.close(error=error)
+        channel._fail(error)
 
     def _set_gone(self, reason: str) -> None:
         if self.failure is not None:
@@ -515,13 +708,14 @@ class Connection:
         for channel in list(self._channels.values()):
             channel._fail(self.failure)
 
-    async def next_control(self, kind: FrameType) -> Frame:
+    async def next_control(self, op: str) -> dict[str, Any]:
+        """The next handshake or gateway-level message, which must be ``op``."""
         try:
-            frame = await self.control.receive()
+            value = await self.control.receive()
         except anyio.EndOfStream:
             assert self.failure is not None
             raise self.failure from None
-        if frame.type != kind:
-            msg = f"expected a {kind.name} frame, got {frame.type.name}"
+        if value["op"] != op:
+            msg = f"expected {op}, got {value['op']}"
             raise WorkerGone(msg)
-        return frame
+        return value

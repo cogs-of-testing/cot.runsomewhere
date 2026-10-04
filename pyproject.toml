@@ -44,6 +44,7 @@ entry-points."cot.runsomewhere.places".thread = "cot.runsomewhere._places:Thread
 [dependency-groups]
 dev = [ { include-group = "lint" }, { include-group = "test" } ]
 test = [
+  "hypothesis>=6",
   "pytest>=8",
   "pytest-timeout>=2.3",
   "rsh-test-services",
@@ -59,6 +60,7 @@ docs = [
   "mkdocs>=1.5,<2",
   "mkdocs-material>=9",
 ]
+bench = [ "pytest-benchmark>=5" ]
 
 [tool.hatch]
 version.source = "vcs"
@@ -128,7 +130,7 @@ ini_options.minversion = "8"
 ini_options.addopts = [ "-ra", "--strict-config", "--strict-markers" ]
 ini_options.log_level = "INFO"
 ini_options.testpaths = [ "testing" ]
-ini_options.norecursedirs = [ "rsh_test_services" ]
+ini_options.norecursedirs = [ ".*", "rsh_test_services" ]
 ini_options.xfail_strict = true
 ini_options.timeout = 60
 ini_options.filterwarnings = [ "error" ]

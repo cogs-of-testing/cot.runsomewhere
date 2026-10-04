@@ -15,12 +15,10 @@ from anyio.lowlevel import cancel_shielded_checkpoint, checkpoint_if_cancelled
 
 from ._channels import Channel, Connection
 from ._errors import HandshakeRefused, RemoteError, StateError
-from ._frames import FrameType
 from ._handshake import Hello, check_peer
 from ._places import Launched, Place
 from ._shutdown import Shutdown, Teardown
 from ._tunnel import ChannelByteStream
-from ._values import decode, encode
 from ._version import version as __version__
 
 if TYPE_CHECKING:
@@ -216,9 +214,12 @@ class Gateway:
     async def _open_channel(self, service: str, params: dict[str, Any]) -> Channel:
         self._require(service)
         connection = self._connection
-        payload = encode({"service": service, "params": params}, connection.channel_id)
+        # refused before a channel exists for it
+        connection.encode_value(params)
         channel = connection.new_channel()
-        connection.send_frame(FrameType.OPEN, channel.id, payload)
+        connection.send_control(
+            "open", channel=channel.id, service=service, params=params
+        )
         await cancel_shielded_checkpoint()
         return channel
 
@@ -248,7 +249,7 @@ async def _stop_left_open(connection: Connection, until: float) -> None:
     """The stop phase of a gateway's shutdown: the worker takes no new
     service calls, and every channel still open is stopped and drained."""
     connection.stopping = True
-    connection.send_frame(FrameType.GATEWAY_STOP, 0)
+    connection.send_control("gateway-stop")
     # tunnels are edges of the teardown graph, torn down with their leaves
     left_open = [channel for channel in connection.channels() if not channel.tunnel]
     for channel in left_open:
@@ -324,9 +325,10 @@ class _Spawn:
                 self._launched.stream, side="caller"
             )
             tasks.start_soon(self._run_connection, connection)
-            remote = Hello.from_value(
-                decode((await connection.next_control(FrameType.HELLO)).payload)
-            )
+            hello = await connection.next_control("hello")
+            del hello["op"]
+            remote = Hello.from_value(hello)
+            connection.peer = f"the worker at pid {remote.pid} ({remote.version})"
             local = Hello.local(__version__)
             check_peer(local=local, remote=remote)
             config = {
@@ -334,10 +336,8 @@ class _Spawn:
                 "services": self._services,
                 **self._place.worker_config(),
             }
-            connection.send_frame(FrameType.CONFIG, 0, encode(config))
-            answer = _accepted(
-                decode((await connection.next_control(FrameType.CONFIG)).payload)
-            )
+            connection.send_control("config", config=config)
+            answer = _accepted(await connection.next_control("config"))
         except BaseException:
             await self._close(graceful=False)
             raise
@@ -416,9 +416,7 @@ class _Spawn:
                     assert connection is not None
                     await _stop_left_open(connection, start + targets.stop)
                     remaining = max(0.0, end - anyio.current_time())
-                    connection.send_frame(
-                        FrameType.GATEWAY_TERMINATE, 0, encode({"deadline": remaining})
-                    )
+                    connection.send_control("gateway-terminate", deadline=remaining)
                 if connection is not None:
                     await connection.gone.wait()
                 if self._launched is not None:
