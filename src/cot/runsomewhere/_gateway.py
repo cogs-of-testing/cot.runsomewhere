@@ -216,7 +216,7 @@ class Gateway:
     async def _open_channel(self, service: str, params: dict[str, Any]) -> Channel:
         self._require(service)
         connection = self._connection
-        payload = encode({"service": service, "params": params}, connection.channel_id)
+        payload = connection.encode_value({"service": service, "params": params})
         channel = connection.new_channel()
         connection.send_frame(FrameType.OPEN, channel.id, payload)
         await cancel_shielded_checkpoint()

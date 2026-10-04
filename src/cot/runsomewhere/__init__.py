@@ -4,7 +4,7 @@
 """
 
 from . import sync
-from ._channels import Channel
+from ._channels import Channel, can_send
 from ._engine import SubinterpreterEngine, ThreadEngine, use_engine
 from ._errors import (
     ChannelClosed,
@@ -20,7 +20,6 @@ from ._open import open_group
 from ._places import Container, Place, Process, Ssh, Subinterpreter, Thread
 from ._remote_exec import RemoteExec
 from ._shutdown import Shutdown, Teardown
-from ._values import can_send
 from ._version import version as __version__
 
 __all__ = [

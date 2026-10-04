@@ -163,7 +163,7 @@ class WorkerCore:
     # -- services -------------------------------------------------------------
 
     def _on_open(self, channel: Channel, payload: bytes) -> None:
-        request = decode(payload, self._connection._channel_for)
+        request = self._connection.decode_value(payload)
         if self._task_group is None:
             channel.close(error=RuntimeError("the worker is not serving yet"))
             return

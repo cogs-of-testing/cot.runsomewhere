@@ -8,7 +8,7 @@ import struct
 import traceback
 from collections import deque
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import anyio.abc
@@ -22,6 +22,29 @@ DEFAULT_WINDOW = 1024 * 1024
 _CREDIT = struct.Struct(">I")
 
 OpenHandler = Callable[["Channel", bytes], None]
+
+#: the value codec's extension code for a channel; the codec knows no more
+CHANNEL_REFERENCE = 0
+
+
+def is_channel(value: object) -> bool:
+    return getattr(type(value), "_rsh_channel", False) is True
+
+
+def _any_channel(value: object) -> tuple[int, int]:
+    if is_channel(value):
+        return CHANNEL_REFERENCE, 0
+    msg = f"cannot send {type(value).__qualname__} values: {value!r}"
+    raise TypeError(msg)
+
+
+def can_send(value: object) -> bool:
+    """Whether a value can cross a channel, checked without sending it."""
+    try:
+        encode(value, _any_channel)
+    except TypeError:
+        return False
+    return True
 
 
 class Channel:
@@ -75,7 +98,7 @@ class Channel:
     async def send(self, value: object) -> None:
         await checkpoint_if_cancelled()
         self._raise_if_unusable()
-        payload = encode(value, self._connection.channel_id)
+        payload = self._connection.encode_value(value)
         while self._credit <= 0:
             await self._wait_for_credit()
             self._raise_if_unusable()
@@ -223,14 +246,14 @@ class Channel:
                 info = _error_info(error)
             elif result is not None:
                 try:
-                    encode(result, self._connection.channel_id)
+                    self._connection.encode_value(result)
                 except TypeError as unsendable:
                     info = _error_info(unsendable)
                 else:
                     info = {"result": result}
             info["taken"] = self._taken_bytes
             self._connection.send_frame(
-                FrameType.CLOSE, self.id, encode(info, self._connection.channel_id)
+                FrameType.CLOSE, self.id, self._connection.encode_value(info)
             )
         self._connection.forget(self)
         self._wake()
@@ -394,13 +417,30 @@ class Connection:
     def forget(self, channel: Channel) -> None:
         self._channels.pop(channel.id, None)
 
-    def channel_id(self, channel: Any) -> int:
+    def encode_value(self, value: object) -> bytes:
+        """Encode a value for this connection: channels in it become references
+        the peer resolves to its end of each."""
+        return encode(value, self._channel_reference)
+
+    def decode_value(self, payload: bytes) -> Any:
+        return decode(payload, self._resolve_reference)
+
+    def _channel_reference(self, value: object) -> tuple[int, int]:
+        if not is_channel(value):
+            msg = f"cannot send {type(value).__qualname__} values: {value!r}"
+            raise TypeError(msg)
         # a sync handler holds its channels wrapped for its thread
-        unwrapped: Channel = getattr(channel, "async_channel", channel)
+        unwrapped = cast("Channel", getattr(value, "async_channel", value))
         if unwrapped._connection is not self:
             msg = f"{unwrapped!r} belongs to another gateway"
             raise StateError(msg)
-        return unwrapped.id
+        return CHANNEL_REFERENCE, unwrapped.id
+
+    def _resolve_reference(self, code: int, channel_id: Any) -> Channel:
+        if code != CHANNEL_REFERENCE or type(channel_id) is not int:
+            msg = f"unknown extension {code} with {channel_id!r}"
+            raise DecodeError(msg)
+        return self._channel_for(channel_id)
 
     def _channel_for(self, channel_id: int) -> Channel:
         channel = self._channels.get(channel_id)
@@ -483,9 +523,7 @@ class Connection:
         elif kind == FrameType.DATA:
             channel = self._channels.get(frame.channel)
             if channel is not None:
-                channel._deliver(
-                    decode(frame.payload, self._channel_for), len(frame.payload)
-                )
+                channel._deliver(self.decode_value(frame.payload), len(frame.payload))
         elif kind == FrameType.CREDIT:
             channel = self._channels.get(frame.channel)
             if channel is not None:
@@ -498,7 +536,7 @@ class Connection:
         elif kind == FrameType.CLOSE:
             channel = self._channels.get(frame.channel)
             if channel is not None:
-                info = decode(frame.payload, self._channel_for)
+                info = self.decode_value(frame.payload)
                 # a half-closed channel stays routed: its full close, with the
                 # result or error, is still to come
                 if "ends" not in info:
