@@ -57,8 +57,42 @@ class ThreadChannel:
 
         return anyio.from_thread.run(wait)
 
+    def drain(self, timeout: float | None = None) -> None:
+        self._raise_if_detached()
+
+        async def drain() -> None:
+            with anyio.fail_after(timeout):
+                await self.async_channel.drain()
+
+        anyio.from_thread.run(drain)
+
     def new(self) -> ThreadChannel:
         return ThreadChannel(self.async_channel.new())
+
+    @property
+    def stopping(self) -> bool:
+        return self.async_channel.stopping
+
+    def wait_stopping(self, timeout: float | None = None) -> bool:
+        """Wait until the peer asks this side to finish; False on timeout."""
+        self._raise_if_detached()
+
+        async def wait() -> bool:
+            with anyio.move_on_after(timeout):
+                await self.async_channel.stop_requested()
+                return True
+            return False
+
+        return anyio.from_thread.run(wait)
+
+    def stop(self, deadline: float | None = None) -> None:
+        anyio.from_thread.run_sync(self.async_channel.stop, deadline)
+
+    def close_send(self) -> None:
+        anyio.from_thread.run_sync(self.async_channel.close_send)
+
+    def close_receive(self) -> None:
+        anyio.from_thread.run_sync(self.async_channel.close_receive)
 
     def close(self) -> None:
         anyio.from_thread.run_sync(self.async_channel.close)

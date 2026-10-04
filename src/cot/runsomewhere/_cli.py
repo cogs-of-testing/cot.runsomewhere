@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import platform
+import signal
 import socket
 import sys
 import sysconfig
@@ -20,7 +21,19 @@ from ._worker import WorkerCore
 async def _serve_fd(fd: int) -> None:
     # handed over as a socket, not a bare fd, so family and type are kept
     stream = await SocketStream.from_socket(socket.socket(fileno=fd))
-    await WorkerCore(stream).run()
+    worker = WorkerCore(stream)
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(_close_on_sigterm, worker)
+        await worker.run()
+        tasks.cancel_scope.cancel()
+
+
+async def _close_on_sigterm(worker: WorkerCore) -> None:
+    # a terminated relay still closes what runs behind it, with no time to
+    # drain, instead of leaving it orphaned
+    with anyio.open_signal_receiver(signal.SIGTERM) as signals:
+        async for _ in signals:
+            worker.request_close(0.0)
 
 
 def worker(arguments: argparse.Namespace) -> None:

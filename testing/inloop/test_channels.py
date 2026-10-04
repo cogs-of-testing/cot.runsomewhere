@@ -1,8 +1,12 @@
+import contextlib
+
 import anyio
 import pytest
 
 from cot import runsomewhere as rsh
 from cot.runsomewhere import testing as rsht
+from cot.runsomewhere._frames import Frame, FrameType, encode_frame
+from cot.runsomewhere._values import encode
 from cot.runsomewhere.testing import open_inloop
 
 pytestmark = pytest.mark.anyio
@@ -78,6 +82,7 @@ async def test_a_channel_sent_over_a_channel_is_usable_on_the_other_side():
             side = await channel.receive()
             await side.send(21)
             assert await side.receive() == 42
+            await side.aclose()
 
 
 async def test_a_channel_cannot_travel_over_another_gateway():
@@ -105,3 +110,330 @@ async def test_leaving_the_open_block_closes_the_channel_for_the_service():
 async def test_open_is_only_a_context_manager(gateway):
     with pytest.raises(TypeError):
         await gateway.open("rsh_test_services.echo")
+
+
+def _half_close_from_caller(pipe, channel, ends):
+    # no public half-close yet: the frame a caller would send, put on the wire
+    frame = Frame(FrameType.CLOSE, channel.id, encode({"ends": ends}))
+    pipe.inject(encode_frame(frame), to="worker")
+
+
+async def test_the_result_still_arrives_after_the_caller_ends_its_sending():
+    async def add(channel):
+        return sum([item async for item in channel])
+
+    pipe = rsht.Pipe()
+    async with open_inloop(pipe=pipe, services={"t.add": add}) as gateway:
+        async with gateway.open("t.add") as channel:
+            for number in [1, 2, 3]:
+                await channel.send(number)
+            await anyio.wait_all_tasks_blocked()
+            _half_close_from_caller(pipe, channel, "send")
+            with anyio.fail_after(1):
+                assert await channel.wait_closed() == 6
+
+
+async def test_the_caller_ending_its_sending_does_not_cancel_a_busy_handler():
+    proceed = anyio.Event()
+
+    async def busy(channel):
+        await proceed.wait()
+        return "finished"
+
+    pipe = rsht.Pipe()
+    async with open_inloop(pipe=pipe, services={"t.busy": busy}) as gateway:
+        async with gateway.open("t.busy") as channel:
+            await anyio.wait_all_tasks_blocked()
+            _half_close_from_caller(pipe, channel, "send")
+            await anyio.wait_all_tasks_blocked()
+            proceed.set()
+            with anyio.fail_after(1):
+                assert await channel.wait_closed() == "finished"
+
+
+async def test_the_caller_ending_its_receiving_fails_the_handlers_sends():
+    async def talk(channel):
+        await channel.receive()
+        try:
+            await channel.send("unwanted")
+        except rsh.ChannelClosed:
+            return "refused"
+        return "sent"
+
+    pipe = rsht.Pipe()
+    async with open_inloop(pipe=pipe, services={"t.talk": talk}) as gateway:
+        async with gateway.open("t.talk") as channel:
+            await anyio.wait_all_tasks_blocked()
+            _half_close_from_caller(pipe, channel, "receive")
+            await channel.send("go")
+            with anyio.fail_after(1):
+                assert await channel.wait_closed() == "refused"
+
+
+async def test_ending_sending_ends_the_handlers_input_and_leaves_its_result(gateway):
+    async with gateway.open("rsh_test_services.add") as channel:
+        for number in [1, 2, 3]:
+            await channel.send(number)
+        channel.close_send()
+        assert await channel.wait_closed() == 6
+
+
+async def test_a_sync_handler_sees_the_end_of_sending_as_the_end_of_iteration(gateway):
+    async with gateway.open("rsh_test_services.sync_add") as channel:
+        for number in [1, 2, 3]:
+            await channel.send(number)
+        channel.close_send()
+        assert await channel.wait_closed() == 6
+
+
+async def test_sending_after_ending_sending_raises_channel_closed(gateway):
+    async with gateway.open("rsh_test_services.add") as channel:
+        channel.close_send()
+        with pytest.raises(rsh.ChannelClosed, match="this side"):
+            await channel.send(1)
+
+
+async def test_the_peer_still_sends_after_the_handler_ended_its_sending(gateway):
+    async with gateway.open("rsh_test_services.ask", question="name?") as channel:
+        assert [item async for item in channel] == ["name?"]
+        await channel.send("rsh")
+        assert await channel.wait_closed() == "rsh"
+
+
+async def test_ending_receiving_discards_what_arrived_and_fails_the_peers_sends():
+    sent_more = anyio.Event()
+    outcome = []
+
+    async def chatter(channel):
+        await channel.send("first")
+        await channel.receive()
+        try:
+            await channel.send("second")
+        except rsh.ChannelClosed:
+            outcome.append("refused")
+        sent_more.set()
+        return "done"
+
+    async with open_inloop(services={"t.chatter": chatter}) as gateway:
+        async with gateway.open("t.chatter") as channel:
+            await anyio.wait_all_tasks_blocked()
+            channel.close_receive()
+            with pytest.raises(rsh.ChannelClosed, match="this side"):
+                await channel.receive()
+            await channel.send("go")
+            with anyio.fail_after(1):
+                await sent_more.wait()
+                assert await channel.wait_closed() == "done"
+    assert outcome == ["refused"]
+
+
+async def test_ending_both_directions_is_a_full_close(gateway):
+    async with gateway.open("rsh_test_services.add") as channel:
+        channel.close_send()
+        channel.close_receive()
+        with pytest.raises(rsh.ChannelClosed, match="this side"):
+            await channel.wait_closed()
+
+
+async def test_drain_returns_once_the_peer_has_taken_every_item():
+    may_take = anyio.Event()
+
+    async def slow(channel):
+        await may_take.wait()
+        return [item async for item in channel]
+
+    async with open_inloop(services={"t.slow": slow}) as gateway:
+        async with gateway.open("t.slow") as channel:
+            for number in [1, 2, 3]:
+                await channel.send(number)
+            with anyio.move_on_after(0.05) as waited:
+                await channel.drain()
+            assert waited.cancelled_caught
+            may_take.set()
+            with anyio.fail_after(1):
+                await channel.drain()
+            channel.close_send()
+            assert await channel.wait_closed() == [1, 2, 3]
+
+
+async def test_drain_with_nothing_sent_returns_at_once(gateway):
+    async with gateway.open("rsh_test_services.add") as channel:
+        with anyio.fail_after(1):
+            await channel.drain()
+
+
+async def test_drain_counts_what_a_peer_that_stopped_receiving_discarded():
+    async def take_one(channel):
+        await channel.receive()
+        channel.close_receive()
+        return "enough"
+
+    async with open_inloop(services={"t.take_one": take_one}) as gateway:
+        async with gateway.open("t.take_one") as channel:
+            for number in [1, 2, 3]:
+                await channel.send(number)
+            with anyio.fail_after(1), pytest.raises(rsh.ItemsDiscarded) as excinfo:
+                await channel.drain()
+            assert (excinfo.value.taken, excinfo.value.discarded) == (1, 2)
+            assert await channel.wait_closed() == "enough"
+
+
+async def test_drain_counts_what_a_handler_that_returned_early_left(gateway):
+    async with gateway.open("rsh_test_services.take", count=2) as channel:
+        for number in range(5):
+            await channel.send(number)
+        with anyio.fail_after(1), pytest.raises(rsh.ItemsDiscarded) as excinfo:
+            await channel.drain()
+        assert (excinfo.value.taken, excinfo.value.discarded) == (2, 3)
+
+
+async def test_drain_raises_worker_gone_when_the_link_is_cut():
+    pipe = rsht.Pipe()
+    async with open_inloop(pipe=pipe) as gateway:
+        async with gateway.open("rsh_test_services.take", count=0) as channel:
+            pipe.hold()
+            await channel.send(1)
+            pipe.cut()
+            with anyio.fail_after(1), pytest.raises(rsh.WorkerGone):
+                await channel.drain()
+
+
+async def test_a_stopped_handler_sends_what_it_owes_and_closes_with_a_result(gateway):
+    async with gateway.open("rsh_test_services.until_stopped") as channel:
+        channel.stop()
+        with anyio.fail_after(1):
+            assert await channel.receive() == "bye"
+            assert await channel.wait_closed() == "stopped"
+
+
+async def test_a_sync_handler_waits_for_its_stop(gateway):
+    async with gateway.open("rsh_test_services.sync_until_stopped") as channel:
+        channel.stop()
+        with anyio.fail_after(5):
+            assert await channel.receive() == "bye"
+            assert await channel.wait_closed() == "stopped"
+
+
+async def test_a_stop_cancels_nothing_and_carries_its_deadline_as_advice():
+    seen = []
+
+    async def watch(channel):
+        await channel.stop_requested()
+        seen.append(channel.stop_deadline - anyio.current_time())
+        return await channel.receive()
+
+    async with open_inloop(services={"t.watch": watch}) as gateway:
+        async with gateway.open("t.watch") as channel:
+            channel.stop(deadline=30)
+            await channel.send("still heard")
+            with anyio.fail_after(1):
+                assert await channel.wait_closed() == "still heard"
+    assert 0 < seen[0] <= 30
+
+
+async def test_a_stop_after_the_handler_returned_is_ignored(gateway):
+    async with gateway.open("rsh_test_services.produce", count=0, size=1) as channel:
+        await channel.wait_closed()
+        channel.stop()
+
+
+async def test_a_client_stops_its_service():
+    async def until_stopped(channel):
+        await channel.stop_requested()
+        return "stopped"
+
+    class Stoppable(rsh.Client, service="t.until_stopped"):
+        pass
+
+    async with open_inloop(services={"t.until_stopped": until_stopped}) as gateway:
+        async with gateway.open(Stoppable) as client:
+            client.stop()
+            with anyio.fail_after(1):
+                assert await client.channel.wait_closed() == "stopped"
+
+
+async def test_a_channel_left_open_is_stopped_and_reported_when_its_gateway_shuts_down():
+    async def split(channel):
+        side = channel.new()
+        await channel.send(side)
+        await side.stop_requested()
+        return "stopped"
+
+    async def leave_it_open():
+        async with rsh.open_group() as group:
+            place = rsht.InLoop(services={"t.split": split})
+            async with (
+                group.spawn(
+                    place, teardown=rsh.Teardown(stop=0.2, drain=0.2)
+                ) as gateway,
+                gateway.open("t.split") as channel,
+            ):
+                return await channel.receive()
+
+    with pytest.warns(ResourceWarning, match="still open"):
+        side = await leave_it_open()
+    with pytest.raises(rsh.ChannelClosed):
+        await side.send(1)
+
+
+async def test_no_channel_is_created_once_the_gateway_is_stopping():
+    refused = []
+
+    async def late(channel):
+        side = channel.new()
+        await channel.send(side)
+        # waiting on its own channel, the handler sees the caller leave rather
+        # than being cancelled
+        with contextlib.suppress(rsh.ChannelClosed):
+            await channel.receive()
+        await side.stop_requested()
+        try:
+            side.new()
+        except rsh.StateError:
+            refused.append(True)
+
+    async def leave_it_open():
+        async with rsh.open_group() as group:
+            place = rsht.InLoop(services={"t.late": late})
+            async with (
+                group.spawn(
+                    place, teardown=rsh.Teardown(stop=0.2, drain=0.2)
+                ) as gateway,
+                gateway.open("t.late") as channel,
+            ):
+                await channel.receive()
+
+    with pytest.warns(ResourceWarning, match="still open"):
+        await leave_it_open()
+    assert refused == [True]
+
+
+async def test_the_stop_phase_finishes_channels_left_open_concurrently():
+    # the deaf channel never closes; waiting on it first would leave the
+    # picky one's discarded item unreported
+    async def two(channel):
+        deaf, picky = channel.new(), channel.new()
+        await channel.send(deaf)
+        await channel.send(picky)
+        with contextlib.suppress(rsh.ChannelClosed):
+            await channel.receive()
+        await picky.stop_requested()
+        picky.close_receive()
+        await anyio.sleep_forever()
+
+    async def leave_them_open():
+        async with rsh.open_group() as group:
+            place = rsht.InLoop(services={"t.two": two})
+            targets = rsh.Teardown(stop=0.3, drain=0.3)
+            async with (
+                group.spawn(place, teardown=targets) as gateway,
+                gateway.open("t.two") as channel,
+            ):
+                await channel.receive()
+                picky = await channel.receive()
+                await picky.send("unread")
+
+    with pytest.warns(ResourceWarning) as warned:
+        await leave_them_open()
+    messages = [str(warning.message) for warning in warned]
+    assert any("discarded 1" in message for message in messages), messages

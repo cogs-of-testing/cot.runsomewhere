@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
+import warnings
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, overload
 
 import anyio
 import anyio.abc
-from anyio.lowlevel import cancel_shielded_checkpoint
+from anyio.lowlevel import cancel_shielded_checkpoint, checkpoint_if_cancelled
 
 from ._channels import Channel, Connection
-from ._errors import HandshakeRefused, StateError
+from ._errors import HandshakeRefused, RemoteError, StateError
 from ._frames import FrameType
 from ._handshake import Hello, check_peer
 from ._places import Launched, Place
+from ._shutdown import Shutdown, Teardown
 from ._tunnel import ChannelByteStream
 from ._values import decode, encode
 from ._version import version as __version__
@@ -27,8 +31,6 @@ if TYPE_CHECKING:
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup
-
-DEFAULT_CLOSE_TIMEOUT = 5.0
 
 
 class Client:
@@ -43,6 +45,10 @@ class Client:
 
     def __init__(self, channel: Any) -> None:
         self.channel = channel
+
+    def stop(self, deadline: float | None = None) -> None:
+        """Ask the service to finish; see `Channel.stop`."""
+        self.channel.stop(deadline)
 
 
 ClientT = TypeVar("ClientT", bound=Client)
@@ -67,7 +73,8 @@ class WorkerInfo:
 
 
 class Group:
-    def __init__(self) -> None:
+    def __init__(self, *, shutdown: Shutdown | None = None) -> None:
+        self.shutdown = shutdown or Shutdown()
         self._task_group: anyio.abc.TaskGroup | None = None
         self._closed = False
 
@@ -99,12 +106,14 @@ class Group:
         *,
         services: Mapping[str, bool] | None = None,
         deploy: Any = None,
-        close_timeout: float = DEFAULT_CLOSE_TIMEOUT,
+        teardown: Teardown | None = None,
     ) -> _Spawn:
+        """Start a worker at ``place``; ``teardown`` overrides the targets the
+        group's shutdown policy gives it."""
         if deploy is not None:
             msg = "deploying on spawn is not implemented yet"
             raise StateError(msg)
-        return _Spawn(self, place, place.launch, services, close_timeout)
+        return _Spawn(self, place, place.launch, services, teardown)
 
     def _tasks(self) -> anyio.abc.TaskGroup:
         if self._task_group is None or self._closed:
@@ -122,11 +131,13 @@ class Gateway:
         worker: WorkerInfo,
         services: frozenset[str],
         group: Group,
+        spawn: _Spawn,
     ) -> None:
         self._connection = connection
         self.worker = worker
         self.services = services
         self._group = group
+        self._spawn_scope = spawn
         self._closed = False
 
     def __repr__(self) -> str:
@@ -147,20 +158,34 @@ class Gateway:
         place: Place,
         *,
         services: Mapping[str, bool] | None = None,
-        close_timeout: float = DEFAULT_CLOSE_TIMEOUT,
+        teardown: Teardown | None = None,
     ) -> _Spawn:
-        """Spawn a worker reachable from this one, tunnelled through it."""
+        """Spawn a worker reachable from this one, tunnelled through it; this
+        worker becomes a proxy in the teardown graph."""
+        leaf = teardown or self._group.shutdown.edge
 
         async def launch(_task_group: anyio.abc.TaskGroup) -> Launched:
             self._require("rsh.via")
-            channel = await self._open_channel("rsh.via", {"place": place.to_value()})
+            # the leaf's targets, for the relay to fall back on when the
+            # caller cannot drive the teardown
+            params = {"place": place.to_value(), "teardown": leaf.to_value()}
+            channel = await self._open_channel("rsh.via", params)
+            channel.tunnel = True
 
-            async def close(_timeout: float) -> None:
+            async def exited() -> None:
+                # the relay closes the tunnel once its leaf has exited
+                with contextlib.suppress(OSError, RemoteError):
+                    await channel.wait_closed()
+
+            async def force() -> None:
                 channel.close()
 
-            return Launched(ChannelByteStream(channel), close)
+            return Launched(ChannelByteStream(channel), exited, force)
 
-        return _Spawn(self._group, place, launch, services, close_timeout)
+        self._spawn_scope.proxy = True
+        return _Spawn(
+            self._group, place, launch, services, teardown, proxy=self._spawn_scope
+        )
 
     def _opener(
         self, service: str, params: dict[str, Any]
@@ -211,6 +236,39 @@ class _Open(Generic[OpenedT]):
         await self._channel.aclose()
 
 
+async def _stop_left_open(connection: Connection, until: float) -> None:
+    """The stop phase of a gateway's shutdown: no new channels from either
+    side, and every channel still open is stopped and drained."""
+    connection.stopping = True
+    connection.send_frame(FrameType.GATEWAY_STOP, 0)
+    # tunnels are edges of the teardown graph, torn down with their leaves
+    left_open = [channel for channel in connection.channels() if not channel.tunnel]
+    for channel in left_open:
+        channel.stop(deadline=max(0.0, until - anyio.current_time()))
+    outcomes = dict.fromkeys(left_open, "")
+
+    async def finish(channel: Channel) -> None:
+        try:
+            await channel.drain()
+        except OSError as error:
+            # a drain during a shutdown records what went wrong, and the
+            # shutdown goes on
+            outcomes[channel] = f": {error}"
+        with contextlib.suppress(OSError, RemoteError):
+            await channel.wait_closed()
+
+    with anyio.move_on_at(until):
+        async with anyio.create_task_group() as finishing:
+            for channel in left_open:
+                finishing.start_soon(finish, channel)
+    for channel, outcome in outcomes.items():
+        warnings.warn(
+            f"{channel!r} was still open when its gateway shut down{outcome}",
+            ResourceWarning,
+            stacklevel=1,
+        )
+
+
 def _accepted(answer: dict[str, Any]) -> dict[str, Any]:
     """The worker's answer to the configuration, unless it refused."""
     if not answer["ok"]:
@@ -227,13 +285,23 @@ class _Spawn:
         place: Place,
         launch: Callable[[anyio.abc.TaskGroup], Awaitable[Launched]],
         services: Mapping[str, bool] | None,
-        close_timeout: float,
+        teardown: Teardown | None,
+        *,
+        proxy: _Spawn | None = None,
     ) -> None:
         self._group = group
         self._place = place
         self._launch = launch
         self._services = dict(services or {})
-        self._close_timeout = close_timeout
+        self._teardown = teardown
+        #: whether workers were spawned through this one
+        self.proxy = False
+        #: the spawn of the worker this one is tunnelled through
+        self._through = proxy
+        #: open spawns tunnelled through this one: torn down before it
+        self._dependents: set[_Spawn] = set()
+        self._closing = False
+        self._closed = anyio.Event()
         self._connection_scope = anyio.CancelScope(shield=True)
         self._connection_done = anyio.Event()
         self._launched: Launched | None = None
@@ -263,17 +331,21 @@ class _Spawn:
                 decode((await connection.next_control(FrameType.CONFIG)).payload)
             )
         except BaseException:
-            with anyio.CancelScope(shield=True):
-                await self._close(graceful=False)
+            await self._close(graceful=False)
             raise
         self._gateway = Gateway(
-            connection, WorkerInfo.from_hello(remote), answer["services"], self._group
+            connection,
+            WorkerInfo.from_hello(remote),
+            answer["services"],
+            self._group,
+            self,
         )
+        if self._through is not None:
+            self._through._dependents.add(self)
         return self._gateway
 
     async def __aexit__(self, *exc_info: object) -> None:
-        with anyio.CancelScope(shield=True):
-            await self._close(graceful=True)
+        await self._close(graceful=True)
 
     async def _run_connection(self, connection: Connection) -> None:
         # shielded inside the task, so an outer cancel does not cut a graceful
@@ -285,15 +357,69 @@ class _Spawn:
             self._connection_done.set()
 
     async def _close(self, *, graceful: bool) -> None:
+        """Tear down this worker's dependents, concurrently, then the worker.
+
+        A dependent is closed once: its own block, leaving later, finds it
+        done.
+        """
+        if self._closing:
+            with anyio.CancelScope(shield=True):
+                await self._closed.wait()
+            return
+        self._closing = True
+        try:
+            try:
+                await self._close_dependents()
+            finally:
+                await self._close_worker(graceful=graceful)
+        finally:
+            self._closed.set()
+            if self._through is not None:
+                self._through._dependents.discard(self)
+
+    async def _close_dependents(self) -> None:
+        if not self._dependents:
+            return
+        async with anyio.create_task_group() as dependents:
+            for dependent in list(self._dependents):
+                dependents.start_soon(partial(dependent._close, graceful=True))
+
+    async def _close_worker(self, *, graceful: bool) -> None:
+        """Stop what is still open, ask the worker to exit, wait for it until
+        the deadline, then have the place force it. A cancelled scope goes
+        straight to force."""
         if self._gateway is not None:
             self._gateway._closed = True
         connection = self._connection
-        if graceful and connection is not None and connection.failure is None:
-            connection.send_frame(FrameType.GATEWAY_CLOSE, 0)
-            with anyio.move_on_after(self._close_timeout):
-                await connection.gone.wait()
-        self._connection_scope.cancel()
-        if connection is not None:
-            await self._connection_done.wait()
-        if self._launched is not None:
-            await self._launched.close(self._close_timeout)
+        healthy = graceful and connection is not None and connection.failure is None
+        if not healthy:
+            # without a gateway-close, the end of the stream is what tells the
+            # worker to go
+            self._connection_scope.cancel()
+        policy = self._group.shutdown
+        targets = self._teardown or (policy.proxy if self.proxy else policy.edge)
+        start = anyio.current_time()
+        end = start + targets.total
+        exited = False
+        try:
+            await checkpoint_if_cancelled()
+            with anyio.move_on_at(end):
+                if healthy:
+                    assert connection is not None
+                    await _stop_left_open(connection, start + targets.stop)
+                    remaining = max(0.0, end - anyio.current_time())
+                    connection.send_frame(
+                        FrameType.GATEWAY_CLOSE, 0, encode({"deadline": remaining})
+                    )
+                if connection is not None:
+                    await connection.gone.wait()
+                if self._launched is not None:
+                    await self._launched.exited()
+                exited = True
+        finally:
+            with anyio.CancelScope(shield=True):
+                self._connection_scope.cancel()
+                if connection is not None:
+                    await self._connection_done.wait()
+                if self._launched is not None and not exited:
+                    await self._launched.force()

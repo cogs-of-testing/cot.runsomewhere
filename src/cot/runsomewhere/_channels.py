@@ -14,7 +14,7 @@ import anyio
 import anyio.abc
 from anyio.lowlevel import cancel_shielded_checkpoint, checkpoint_if_cancelled
 
-from ._errors import ChannelClosed, RemoteError, StateError, WorkerGone
+from ._errors import ChannelClosed, ItemsDiscarded, RemoteError, StateError, WorkerGone
 from ._frames import PREAMBLE, Frame, FrameDecoder, FrameError, FrameType, encode_frame
 from ._values import DecodeError, decode, encode
 
@@ -28,6 +28,8 @@ class Channel:
     """An ordered, two-way stream of values with the peer."""
 
     _rsh_channel = True
+    #: carries a tunnelled gateway: an edge of the teardown graph
+    tunnel = False
 
     def __init__(self, connection: Connection, channel_id: int) -> None:
         self._connection = connection
@@ -37,11 +39,26 @@ class Channel:
         self._credit = DEFAULT_WINDOW
         self._credit_arrived: anyio.Event | None = None
         self._unacknowledged = 0
+        #: sizes of the items sent and not yet taken, oldest first
+        self._outstanding: deque[int] = deque()
+        self._granted_unmatched = 0
+        self._taken_by_peer = 0
+        self._granted_total = 0
+        self._taken_bytes = 0
         self._closed_locally = False
+        self._ended_sending = False
+        self._ended_receiving = False
+        #: the peer's full close: its result or error
         self._peer_close: dict[str, Any] | None = None
+        self._peer_ended_sending = False
+        self._peer_ended_receiving = False
         self._peer_closed = anyio.Event()
         self._failure: BaseException | None = None
         self._receivers_waiting = 0
+        self._stop_requested = anyio.Event()
+        #: when the peer asked for this channel's work to be done, on this
+        #: side's event loop clock; best effort, the peer enforces it
+        self.stop_deadline: float | None = None
         #: set by the worker for a service's channel; cancelled on a close the
         #: handler is not waiting for
         self.handler_scope: anyio.CancelScope | None = None
@@ -60,17 +77,47 @@ class Channel:
         self._raise_if_unusable()
         payload = encode(value, self._connection.channel_id)
         while self._credit <= 0:
-            self._credit_arrived = anyio.Event()
-            await self._credit_arrived.wait()
+            await self._wait_for_credit()
             self._raise_if_unusable()
         self._credit -= len(payload)
+        self._outstanding.append(len(payload))
         self._connection.send_frame(FrameType.DATA, self.id, payload)
         await cancel_shielded_checkpoint()
+
+    async def drain(self) -> None:
+        """Wait until the peer has taken every item sent.
+
+        Taken is not processed: the peer's code may still fail with an item it
+        took. Raises `ItemsDiscarded` when the peer stopped receiving first.
+        """
+        await checkpoint_if_cancelled()
+        while self._outstanding:
+            if self._peer_ended_receiving:
+                msg = (
+                    f"{self!r}: the other side took {self._taken_by_peer} items "
+                    f"and discarded {len(self._outstanding)}"
+                )
+                raise ItemsDiscarded(
+                    msg, taken=self._taken_by_peer, discarded=len(self._outstanding)
+                )
+            if self._failure is not None:
+                raise self._failure
+            await self._wait_for_credit()
+
+    async def _wait_for_credit(self) -> None:
+        # shared by a blocked send and a drain: replacing an unset event would
+        # leave the other waiting on one nobody sets
+        if self._credit_arrived is None or self._credit_arrived.is_set():
+            self._credit_arrived = anyio.Event()
+        await self._credit_arrived.wait()
 
     async def receive(self) -> Any:
         # a cancellation is taken either before an item is removed or not at
         # all, so a cancelled receive never loses one
         await checkpoint_if_cancelled()
+        if self._ended_receiving:
+            msg = f"{self!r} was closed by this side"
+            raise ChannelClosed(msg)
         while not self._items:
             self._raise_if_finished()
             self._item_arrived = anyio.Event()
@@ -80,6 +127,7 @@ class Channel:
             finally:
                 self._receivers_waiting -= 1
         value, size = self._items.popleft()
+        self._taken_bytes += size
         self._consumed(size)
         await cancel_shielded_checkpoint()
         return value
@@ -109,13 +157,66 @@ class Channel:
         self.close()
         await cancel_shielded_checkpoint()
 
+    def stop(self, deadline: float | None = None) -> None:
+        """Ask the peer to finish: send what it owes and close with a result.
+
+        Nothing is cancelled or dropped, and both directions stay open.
+        ``deadline`` is in seconds from now, and only advice to the peer.
+        """
+        if self._closed_locally or self._peer_close is not None:
+            return
+        info = {} if deadline is None else {"deadline": deadline}
+        self._connection.send_frame(FrameType.STOP, self.id, encode(info))
+
+    @property
+    def stopping(self) -> bool:
+        """Whether the peer asked this side to finish."""
+        return self._stop_requested.is_set()
+
+    async def stop_requested(self) -> None:
+        """Wait until the peer asks this side to finish."""
+        await self._stop_requested.wait()
+
+    def close_send(self) -> None:
+        """End sending: the peer takes what was sent, then sees the end."""
+        self._end(send=True)
+
+    def close_receive(self) -> None:
+        """End receiving: what arrived and was not taken is discarded, and the
+        peer's sends fail."""
+        self._end(send=False)
+
+    def _end(self, *, send: bool) -> None:
+        if self._closed_locally or (
+            self._ended_sending if send else self._ended_receiving
+        ):
+            return
+        if self._ended_receiving if send else self._ended_sending:
+            self.close()
+            return
+        if send:
+            self._ended_sending = True
+        else:
+            self._ended_receiving = True
+            self._items.clear()
+        if self._peer_close is None and self._failure is None:
+            info: dict[str, Any] = {"ends": "send"}
+            if not send:
+                info = {"ends": "receive", "taken": self._taken_bytes}
+            self._connection.send_frame(FrameType.CLOSE, self.id, encode(info))
+        self._wake()
+
     def close(
         self, *, result: object = None, error: BaseException | None = None
     ) -> None:
-        """Close for both directions, telling the peer unless it closed first."""
+        """Close both directions, telling the peer unless it closed first.
+
+        Only this close carries a result or an error, also after `close_send`.
+        """
         if self._closed_locally:
             return
         self._closed_locally = True
+        self._ended_sending = self._ended_receiving = True
         if self._peer_close is None and self._failure is None:
             info: dict[str, Any] = {}
             if error is not None:
@@ -127,6 +228,7 @@ class Channel:
                     info = _error_info(unsendable)
                 else:
                     info = {"result": result}
+            info["taken"] = self._taken_bytes
             self._connection.send_frame(
                 FrameType.CLOSE, self.id, encode(info, self._connection.channel_id)
             )
@@ -136,7 +238,7 @@ class Channel:
     # -- driven by the connection ---------------------------------------------
 
     def _deliver(self, value: Any, size: int) -> None:
-        if self._closed_locally:
+        if self._ended_receiving:
             return
         self._items.append((value, size))
         if self._item_arrived is not None:
@@ -144,10 +246,30 @@ class Channel:
 
     def _grant(self, amount: int) -> None:
         self._credit += amount
+        self._match_taken(amount)
         if self._credit_arrived is not None:
             self._credit_arrived.set()
 
+    def _match_taken(self, amount: int) -> None:
+        # the peer takes items in order, so bytes taken map to whole items
+        self._granted_total += amount
+        self._granted_unmatched += amount
+        while self._outstanding and self._granted_unmatched >= self._outstanding[0]:
+            self._granted_unmatched -= self._outstanding.popleft()
+            self._taken_by_peer += 1
+
     def _closed_by_peer(self, info: dict[str, Any]) -> None:
+        ends = info.pop("ends", None)
+        # taken but not yet granted back, since credit goes out in batches
+        taken = info.pop("taken", self._granted_total)
+        self._match_taken(max(0, taken - self._granted_total))
+        self._peer_ended_sending |= ends in (None, "send")
+        self._peer_ended_receiving |= ends in (None, "receive")
+        if ends is not None:
+            # a half-close carries no result and stops nothing: the handler
+            # learns of it from its next channel operation
+            self._wake()
+            return
         self._peer_close = info
         self._peer_closed.set()
         waited_for = self._receivers_waiting > 0
@@ -156,6 +278,11 @@ class Channel:
         # is cancelled
         if not waited_for and self.handler_scope is not None:
             self.handler_scope.cancel()
+
+    def _stopped_by_peer(self, info: dict[str, Any]) -> None:
+        if "deadline" in info:
+            self.stop_deadline = anyio.current_time() + info["deadline"]
+        self._stop_requested.set()
 
     def _fail(self, error: BaseException) -> None:
         if self._failure is None:
@@ -170,7 +297,9 @@ class Channel:
             self._credit_arrived.set()
 
     def _consumed(self, size: int) -> None:
-        if self._closed_locally or self._peer_close is not None:
+        # after the peer ends sending its credit still comes back: it is how
+        # the peer learns what was taken
+        if self._ended_receiving or self._peer_close is not None:
             return
         self._unacknowledged += size
         if self._unacknowledged >= DEFAULT_WINDOW // 4 or not self._items:
@@ -190,18 +319,19 @@ class Channel:
         return self._peer_close.get("result")
 
     def _raise_if_unusable(self) -> None:
-        if self._closed_locally:
+        if self._ended_sending:
             msg = f"{self!r} was closed by this side"
             raise ChannelClosed(msg)
-        if self._peer_close is not None:
+        if self._peer_ended_receiving:
             msg = f"{self!r} was closed by the other side"
             raise ChannelClosed(msg)
         if self._failure is not None:
             raise self._failure
 
     def _raise_if_finished(self) -> None:
-        if self._peer_close is not None:
-            self._close_result()
+        if self._peer_ended_sending:
+            if self._peer_close is not None:
+                self._close_result()
             msg = f"{self!r} was closed by the other side"
             raise ChannelClosed(msg)
         if self._failure is not None:
@@ -242,6 +372,8 @@ class Connection:
         )
         self.failure: WorkerGone | None = None
         self.gone = anyio.Event()
+        #: after a gateway stop, from either side, no channel is created
+        self.stopping = False
         self._outgoing_send.send_nowait(PREAMBLE)
 
     # -- channels -------------------------------------------------------------
@@ -249,10 +381,17 @@ class Connection:
     def new_channel(self) -> Channel:
         if self.failure is not None:
             raise self.failure
+        if self.stopping:
+            msg = "the gateway is stopping: no new channels"
+            raise StateError(msg)
         channel = Channel(self, self._next_id)
         self._next_id += 2
         self._channels[channel.id] = channel
         return channel
+
+    def channels(self) -> list[Channel]:
+        """The channels open on this connection."""
+        return list(self._channels.values())
 
     def forget(self, channel: Channel) -> None:
         self._channels.pop(channel.id, None)
@@ -330,11 +469,17 @@ class Connection:
         kind = frame.type
         if kind in (FrameType.HELLO, FrameType.CONFIG, FrameType.GATEWAY_CLOSE):
             self._control_send.send_nowait(frame)
+        elif kind == FrameType.GATEWAY_STOP:
+            self.stopping = True
         elif kind == FrameType.OPEN:
             if self._on_open is None:
                 msg = "the caller was asked to open a channel"
                 raise FrameError(msg)
-            self._on_open(self._channel_for(frame.channel), frame.payload)
+            opened = self._channel_for(frame.channel)
+            if self.stopping:
+                opened.close(error=StateError("the gateway is stopping"))
+                return
+            self._on_open(opened, frame.payload)
         elif kind == FrameType.DATA:
             channel = self._channels.get(frame.channel)
             if channel is not None:
@@ -345,10 +490,20 @@ class Connection:
             channel = self._channels.get(frame.channel)
             if channel is not None:
                 channel._grant(int(_CREDIT.unpack(frame.payload)[0]))
-        elif kind == FrameType.CLOSE:
-            channel = self._channels.pop(frame.channel, None)
+        elif kind == FrameType.STOP:
+            # a stop for a channel already closed found its work done
+            channel = self._channels.get(frame.channel)
             if channel is not None:
-                channel._closed_by_peer(decode(frame.payload, self._channel_for))
+                channel._stopped_by_peer(decode(frame.payload))
+        elif kind == FrameType.CLOSE:
+            channel = self._channels.get(frame.channel)
+            if channel is not None:
+                info = decode(frame.payload, self._channel_for)
+                # a half-closed channel stays routed: its full close, with the
+                # result or error, is still to come
+                if "ends" not in info:
+                    del self._channels[frame.channel]
+                channel._closed_by_peer(info)
 
     def _set_gone(self, reason: str) -> None:
         if self.failure is not None:

@@ -20,12 +20,20 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 
+#: how long a process gets to exit after it was terminated, before the kill
+TERMINATE_GRACE = 1.0
+
+
 @dataclass
 class Launched:
     """A started worker: its protocol stream, and how to make it go away."""
 
     stream: anyio.abc.ByteStream
-    close: Callable[[float], Awaitable[None]]
+    #: returns once the worker has exited by itself
+    exited: Callable[[], Awaitable[None]]
+    #: the place's force steps, for a worker that did not exit in time; the
+    #: place bounds them, since only it knows what its worker allows
+    force: Callable[[], Awaitable[None]]
 
 
 class Place:
@@ -128,19 +136,19 @@ class Process(Place):
             )
         stream = await SocketStream.from_socket(ours)
 
-        async def close(timeout: float) -> None:
-            with anyio.move_on_after(timeout):
-                await process.wait()
-                return
+        async def exited() -> None:
+            await process.wait()
+
+        async def force() -> None:
             if process.returncode is None:
                 process.terminate()
-                with anyio.move_on_after(timeout):
+                with anyio.move_on_after(TERMINATE_GRACE):
                     await process.wait()
                     return
                 process.kill()
             await process.wait()
 
-        return Launched(stream, close)
+        return Launched(stream, exited, force)
 
 
 async def _check_interpreter(python: str) -> None:

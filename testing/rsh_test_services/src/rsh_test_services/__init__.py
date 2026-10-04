@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
+
+import anyio
 
 from cot import runsomewhere as rsh
 
@@ -15,12 +18,44 @@ async def echo(channel):
 
 
 async def total(channel):
-    # closing ends a channel in both directions, so the end of input is a
-    # None item rather than a close
+    # input ends at a None item; add is the same service ended by close_send
     result = 0
     while (item := await channel.receive()) is not None:
         result += item
     return result
+
+
+async def add(channel):
+    return sum([item async for item in channel])
+
+
+def sync_add(channel):
+    return sum(channel)
+
+
+async def ask(channel, *, question):
+    await channel.send(question)
+    channel.close_send()
+    return await channel.receive()
+
+
+async def take(channel, *, count, delay=0):
+    # the delay lets a caller finish sending before items go missing
+    await anyio.sleep(delay)
+    return [await channel.receive() for _ in range(count)]
+
+
+async def until_stopped(channel):
+    await channel.stop_requested()
+    await channel.send("bye")
+    return "stopped"
+
+
+def sync_until_stopped(channel):
+    if not channel.wait_stopping(timeout=5):
+        return "never stopped"
+    channel.send("bye")
+    return "stopped"
 
 
 async def fail(channel, *, message):
@@ -53,6 +88,13 @@ def stubborn(channel):
     # ignores its closed channel, so only killing the worker ends it
     while True:
         time.sleep(0.1)
+
+
+async def wedge(channel):
+    # blocks the worker's event loop and ignores SIGTERM: only a kill ends it
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(0.1)  # noqa: ASYNC251 - blocking the loop is the point
 
 
 class Echo(rsh.Client, service="rsh_test_services.echo"):

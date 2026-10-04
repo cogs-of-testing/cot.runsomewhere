@@ -10,6 +10,8 @@ import anyio.abc
 from ._errors import ChannelClosed, RemoteError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ._channels import Channel
     from ._places import Place
 
@@ -45,8 +47,12 @@ class ChannelByteStream(anyio.abc.ByteStream):
         self.channel.close()
 
 
-async def relay(channel: Channel, place: Place) -> None:
-    """The worker side of rsh.via: launch the place, move bytes both ways."""
+async def relay(channel: Channel, place: Place, budget: Callable[[], float]) -> None:
+    """The worker side of rsh.via: launch the place, move bytes both ways.
+
+    ``budget`` says how long the leaf may take to exit once the tunnel ends,
+    before the place forces it: what is left of the worker's own shutdown.
+    """
     async with anyio.create_task_group() as tg:
         launched = await place.launch(tg)
         stream = launched.stream
@@ -77,5 +83,10 @@ async def relay(channel: Channel, place: Place) -> None:
             with anyio.CancelScope(shield=True):
                 # the leaf waits for its stream to end before it exits
                 await stream.aclose()
-                await launched.close(5)
+                exited = False
+                with anyio.move_on_after(budget()):
+                    await launched.exited()
+                    exited = True
+                if not exited:
+                    await launched.force()
             tg.cancel_scope.cancel()

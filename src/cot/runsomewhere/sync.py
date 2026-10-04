@@ -13,6 +13,7 @@ import anyio
 from ._engine import DEFAULT_ENGINE, Engine, Host, selected_engine
 from ._errors import ChannelClosed, StateError
 from ._gateway import WorkerInfo
+from ._shutdown import Shutdown, Teardown
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -36,10 +37,10 @@ def _refuse_inside_event_loop() -> None:
     raise StateError(msg)
 
 
-def open_group() -> Group:
-    """The scope gateways are spawned in, run in the engine set with
-    ``rsh.use_engine``, or in the default engine."""
-    return Group(selected_engine() or DEFAULT_ENGINE)
+def open_group(*, shutdown: Shutdown | None = None) -> Group:
+    """The scope gateways are spawned in, torn down by ``shutdown``, run in the
+    engine set with ``rsh.use_engine``, or in the default engine."""
+    return Group(selected_engine() or DEFAULT_ENGINE, shutdown=shutdown)
 
 
 class _Scope:
@@ -64,15 +65,16 @@ class _Scope:
 
 
 class Group:
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, shutdown: Shutdown | None = None) -> None:
         self._selected = engine
+        self.shutdown = shutdown or Shutdown()
         self.engine: Host | None = None
         self._handle: int | None = None
 
     def __enter__(self) -> Self:
         _refuse_inside_event_loop()
         self.engine = self._selected.host()
-        self._handle = self.engine.call("open_group")
+        self._handle = self.engine.call("open_group", self.shutdown.to_value())
         return self
 
     def __exit__(self, *exc_info: object) -> None:
@@ -84,7 +86,7 @@ class Group:
         place: Place,
         *,
         services: dict[str, bool] | None = None,
-        close_timeout: float = 5.0,
+        teardown: Teardown | None = None,
     ) -> _Scope:
         engine = self.engine
         if engine is None:
@@ -93,7 +95,11 @@ class Group:
 
         def enter() -> tuple[int, Gateway]:
             handle, info, offered = engine.call(
-                "spawn", self._handle, engine.place(place), services, close_timeout
+                "spawn",
+                self._handle,
+                engine.place(place),
+                services,
+                None if teardown is None else teardown.to_value(),
             )
             return handle, Gateway(engine, handle, WorkerInfo(**info), offered)
 
@@ -138,6 +144,18 @@ class Channel:
     def wait_closed(self, timeout: float | None = None) -> Any:
         return self._engine.call("wait_closed", self._handle, timeout)
 
+    def drain(self, timeout: float | None = None) -> None:
+        self._engine.call("drain", self._handle, timeout)
+
+    def stop(self, deadline: float | None = None) -> None:
+        self._engine.call("stop", self._handle, deadline)
+
+    def close_send(self) -> None:
+        self._engine.call("close_send", self._handle)
+
+    def close_receive(self) -> None:
+        self._engine.call("close_receive", self._handle)
+
     def __iter__(self) -> Iterator[Any]:
         try:
             while True:
@@ -161,6 +179,18 @@ class _NonSuspending:
 
     async def wait_closed(self) -> Any:
         return self._channel.wait_closed()
+
+    async def drain(self) -> None:
+        self._channel.drain()
+
+    def stop(self, deadline: float | None = None) -> None:
+        self._channel.stop(deadline)
+
+    def close_send(self) -> None:
+        self._channel.close_send()
+
+    def close_receive(self) -> None:
+        self._channel.close_receive()
 
 
 class _SyncClient:

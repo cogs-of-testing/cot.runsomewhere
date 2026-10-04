@@ -152,8 +152,15 @@ queued without limit.
 
 ## Stopping
 
+Stopping a service asks its handler to finish and close its channel with a
+result; closing the channel ends the call. A gateway's shutdown stops its
+services first and closes what is left
+([shutdown](gateways-and-channels.md#shutdown)). A handler learns of a stop
+from `channel.stopping`; one that ignores it is closed when the caller's
+deadline passes.
+
 Closing the channel from the caller, closing the client, or closing the
-gateway stops a call:
+gateway ends a call:
 
 - an async handler waiting on its channel sees the close (its receive raises
   `ChannelClosed`, its iteration ends); one busy with anything else is
@@ -163,9 +170,10 @@ gateway stops a call:
   outside.
 
 A sync handler that ignores its closed channel keeps the worker from exiting
-cleanly, and the gateway's close escalates to terminating and then killing
-the worker process. In-process places (thread, subinterpreter) cannot be
-killed, which is one reason to put code you do not control in a process.
+cleanly, and the gateway's shutdown forces the worker: terminating and then
+killing a process. In-process places (thread, subinterpreter) cannot be
+killed; a handler still running there is reported and abandoned, which is one
+reason to put code you do not control in a process.
 
 ## Rules for service authors
 

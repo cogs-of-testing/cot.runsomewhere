@@ -73,9 +73,9 @@ group opened without an override. The common case is one engine per managing
 process, handling every worker that process spawns.
 
 The default holds no gateways of its own: every group still closes with its
-block, so between groups the engine is idle. Stopping the engine itself when
-the managing process exits is part of
-[managed shutdown](gateways-and-channels.md#managed-shutdown-open).
+block, so between groups the engine is idle. The engine itself is stopped
+when the managing process's main thread exits
+([shutdown](gateways-and-channels.md#shutdown)).
 
 An override is a context variable, set with `rsh.use_engine`:
 
