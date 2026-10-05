@@ -85,8 +85,8 @@ the messages between them are that package's private protocol, versioned and
 tested together, and a caller only sees methods.
 
 **Proposed:** clients are written once, async. On the sync facade the same
-call yields a sync wrapper, which runs each method in the engine host
-([surfaces](surfaces.md)):
+call yields a sync wrapper, which runs each method in an event loop of the
+client's own, its channel calls in the engine host ([surfaces](surfaces.md)):
 
 ```python
 with rsh.sync.open_group() as group:
