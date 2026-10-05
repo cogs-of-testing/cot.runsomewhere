@@ -6,11 +6,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Iterator
+from contextlib import AbstractAsyncContextManager, ExitStack
 from typing import TYPE_CHECKING, Any
 
 import anyio
+import anyio.from_thread
 
-from ._engine import DEFAULT_ENGINE, Engine, Host, selected_engine
+from ._engine import (
+    DEFAULT_ENGINE,
+    AsyncHostedChannel,
+    Engine,
+    Host,
+    HostedChannel,
+    selected_engine,
+)
 from ._errors import ChannelClosed, StateError
 from ._gateway import WorkerInfo
 from ._shutdown import Shutdown, Teardown
@@ -46,13 +55,17 @@ def open_group(*, shutdown: Shutdown | None = None) -> Group:
 class _Scope:
     """A sync scope over an async context manager kept entered in the host."""
 
-    def __init__(self, engine: Host, enter: Callable[[], tuple[int, Any]]) -> None:
+    def __init__(
+        self, engine: Host, enter: Callable[[ExitStack], tuple[int, Any]]
+    ) -> None:
         self._engine = engine
         self._enter = enter
         self._handle: int | None = None
+        #: what the value needs closed after the host has left the scope
+        self._after = ExitStack()
 
     def __enter__(self) -> Any:
-        self._handle, value = self._enter()
+        self._handle, value = self._enter(self._after)
         return value
 
     def __exit__(
@@ -61,7 +74,8 @@ class _Scope:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self._engine.call("exit", self._handle)
+        with self._after:
+            self._engine.call("exit", self._handle)
 
 
 class Group:
@@ -93,7 +107,7 @@ class Group:
             msg = "the group is not open"
             raise StateError(msg)
 
-        def enter() -> tuple[int, Gateway]:
+        def enter(_after: ExitStack) -> tuple[int, Gateway]:
             handle, info, offered = engine.call(
                 "spawn",
                 self._handle,
@@ -120,29 +134,30 @@ class Gateway:
         API, with every async method of the client made sync."""
         service = target if isinstance(target, str) else target.service
 
-        def enter() -> tuple[int, Any]:
+        def enter(after: ExitStack) -> tuple[int, Any]:
             handle = self._engine.call("open", self._handle, service, params)
-            channel = Channel(self._engine, handle)
             if isinstance(target, str):
-                return handle, channel
-            return handle, _SyncClient(target(_NonSuspending(channel)))
+                return handle, Channel(self._engine, handle)
+            # the client's async code runs in an event loop of its own, which
+            # outlives every call, so what one call starts the next can finish
+            portal = after.enter_context(anyio.from_thread.start_blocking_portal())
+            client = target(AsyncHostedChannel(self._engine, handle))
+            return handle, _SyncClient(client, portal)
 
         return _Scope(self._engine, enter)
 
 
-class Channel:
-    def __init__(self, engine: Host, handle: int) -> None:
-        self._engine = engine
-        self._handle = handle
-
+class Channel(HostedChannel):
     def send(self, value: object) -> None:
-        self._engine.call("send", self._handle, value)
+        self._engine.call("send", self._handle, self._engine.export(value))
 
     def receive(self, timeout: float | None = None) -> Any:
-        return self._engine.call("receive", self._handle, timeout)
+        data = self._engine.call("receive", self._handle, timeout)
+        return self._engine.import_value(data, Channel)
 
     def wait_closed(self, timeout: float | None = None) -> Any:
-        return self._engine.call("wait_closed", self._handle, timeout)
+        data = self._engine.call("wait_closed", self._handle, timeout)
+        return self._engine.import_value(data, Channel)
 
     def drain(self, timeout: float | None = None) -> None:
         self._engine.call("drain", self._handle, timeout)
@@ -156,6 +171,11 @@ class Channel:
     def close_receive(self) -> None:
         self._engine.call("close_receive", self._handle)
 
+    def close(self) -> None:
+        """Close a channel that arrived as a value; one a block opened closes
+        with its block."""
+        self._engine.call("close", self._handle)
+
     def __iter__(self) -> Iterator[Any]:
         try:
             while True:
@@ -164,61 +184,59 @@ class Channel:
             return
 
 
-class _NonSuspending:
-    """An async channel API that completes without suspending, so a client's
-    coroutines can be driven to the end synchronously."""
+def _as_sync(value: Any) -> Any:
+    """A channel the client's async code handed out, as the sync API."""
+    if isinstance(value, AsyncHostedChannel):
+        return Channel(value._engine, value._handle)
+    return value
 
-    def __init__(self, channel: Channel) -> None:
-        self._channel = channel
 
-    async def send(self, value: object) -> None:
-        self._channel.send(value)
-
-    async def receive(self) -> Any:
-        return self._channel.receive()
-
-    async def wait_closed(self) -> Any:
-        return self._channel.wait_closed()
-
-    async def drain(self) -> None:
-        self._channel.drain()
-
-    def stop(self, deadline: float | None = None) -> None:
-        self._channel.stop(deadline)
-
-    def close_send(self) -> None:
-        self._channel.close_send()
-
-    def close_receive(self) -> None:
-        self._channel.close_receive()
+async def _await(coroutine: Coroutine[Any, Any, Any]) -> Any:
+    return await coroutine
 
 
 class _SyncClient:
-    def __init__(self, client: Any) -> None:
+    """A client's API without ``await``: each method runs in the client's own
+    event loop, and channels it returns come back with the sync API."""
+
+    def __init__(self, client: Any, portal: anyio.from_thread.BlockingPortal) -> None:
         self._client = client
+        self._portal = portal
 
     def __getattr__(self, name: str) -> Any:
         attribute = getattr(self._client, name)
         if not callable(attribute):
-            return attribute
+            return _as_sync(attribute)
 
         def call(*args: Any, **kwargs: Any) -> Any:
             result = attribute(*args, **kwargs)
             if isinstance(result, Coroutine):
-                return _drive(result)
-            return result
+                return _as_sync(self._portal.call(_await, result))
+            if isinstance(result, AbstractAsyncContextManager):
+                return _SyncContext(self._portal, result)
+            return _as_sync(result)
 
         return call
 
 
-def _drive(coroutine: Coroutine[Any, Any, Any]) -> Any:
-    try:
-        coroutine.send(None)
-    except StopIteration as done:
-        return done.value
-    coroutine.close()
-    msg = (
-        "a client method awaited something other than its channel, which the "
-        "sync facade cannot run"
-    )
-    raise StateError(msg)
+class _SyncContext:
+    """A client's async context manager, entered and left in its event loop."""
+
+    def __init__(
+        self,
+        portal: anyio.from_thread.BlockingPortal,
+        context: AbstractAsyncContextManager[Any],
+    ) -> None:
+        self._portal = portal
+        self._context = context
+
+    def __enter__(self) -> Any:
+        return _as_sync(self._portal.call(self._context.__aenter__))
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool | None:
+        return self._portal.call(self._context.__aexit__, exc_type, exc, tb)

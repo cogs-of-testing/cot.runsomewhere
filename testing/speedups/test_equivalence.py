@@ -165,3 +165,69 @@ def test_a_subinterpreter_with_its_own_gil_can_use_it():
         )
     finally:
         interpreter.close()
+
+
+def holds_a_marker(value):
+    if type(value) is Marker:
+        return True
+    if type(value) is dict:
+        return any(holds_a_marker(k) or holds_a_marker(v) for k, v in value.items())
+    if type(value) in (list, tuple, set, frozenset):
+        return any(holds_a_marker(item) for item in value)
+    return False
+
+
+def containers(value):
+    if type(value) is dict:
+        yield value
+        for key, item in value.items():
+            yield from containers(key)
+            yield from containers(item)
+    elif type(value) in (list, tuple, set, frozenset):
+        yield value
+        for item in value:
+            yield from containers(item)
+
+
+markers = st.builds(Marker, st.text(max_size=3))
+hashable_with_markers = st.recursive(
+    markers | scalars,
+    lambda inner: st.tuples(inner, inner) | st.frozensets(inner, max_size=3),
+    max_leaves=6,
+)
+
+
+@given(
+    st.recursive(
+        hashable_with_markers,
+        lambda inner: (
+            st.lists(inner, max_size=4)
+            | st.tuples(inner, inner)
+            | st.dictionaries(hashable_with_markers, inner, max_size=3)
+            | st.sets(hashable_with_markers, max_size=3)
+        ),
+        max_leaves=25,
+    )
+)
+def test_the_c_decoder_records_every_container_holding_an_extension(value):
+    carriers = []
+    decoded = speedups.decode(
+        py_encode(value, to_reference), from_reference, DecodeError, carriers
+    )
+    holding = [c for c in containers(decoded) if holds_a_marker(c)]
+    assert {id(c) for c in carriers} == {id(c) for c in holding}
+    assert len(carriers) == len(holding)
+    # innermost first: a carrier comes after every carrier inside it
+    position = {id(c): index for index, c in enumerate(carriers)}
+    for carrier in carriers:
+        for inner in containers(carrier):
+            if inner is not carrier and id(inner) in position:
+                assert position[id(inner)] < position[id(carrier)]
+
+
+def test_the_package_records_carriers_with_the_c_decoder():
+    _, carriers = _values.decode_recording(
+        py_encode([(Marker("x"),)], to_reference), from_reference
+    )
+    assert carriers is not None
+    assert len(carriers) == 2

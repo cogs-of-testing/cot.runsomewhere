@@ -17,7 +17,7 @@ from anyio.lowlevel import cancel_shielded_checkpoint, checkpoint_if_cancelled
 from ._control import ProtocolError, message, unknown
 from ._errors import ChannelClosed, ItemsDiscarded, RemoteError, StateError, WorkerGone
 from ._frames import MAX_FIELD, PREAMBLE, Frame, FrameDecoder, FrameError, encode_frame
-from ._values import DecodeError, decode, encode
+from ._values import DecodeError, decode, decode_recording, encode
 from ._version import version as __version__
 
 log = logging.getLogger(__name__)
@@ -66,7 +66,9 @@ class Channel:
     def __init__(self, connection: Connection, channel_id: int) -> None:
         self._connection = connection
         self.id = channel_id
-        self._items: deque[tuple[Any, int]] = deque()
+        #: value, encoded size, whether it carries channels, and the containers
+        #: in it holding them, innermost first, where the decoder recorded them
+        self._items: deque[tuple[Any, int, bool, list[Any] | None]] = deque()
         self._item_arrived: anyio.Event | None = None
         self._credit = DEFAULT_WINDOW
         self._credit_arrived: anyio.Event | None = None
@@ -152,6 +154,12 @@ class Channel:
         await self._credit_arrived.wait()
 
     async def receive(self) -> Any:
+        value, _, _ = await self.receive_item()
+        return value
+
+    async def receive_item(self) -> tuple[Any, bool, list[Any] | None]:
+        """The next item, whether channels arrived in it, and the containers
+        holding them, innermost first, when the decoder recorded them."""
         # a cancellation is taken either before an item is removed or not at
         # all, so a cancelled receive never loses one
         await checkpoint_if_cancelled()
@@ -166,10 +174,10 @@ class Channel:
                 await self._item_arrived.wait()
             finally:
                 self._receivers_waiting -= 1
-        value, size = self._items.popleft()
+        value, size, carries_channels, carriers = self._items.popleft()
         self._consumed(size)
         await cancel_shielded_checkpoint()
-        return value
+        return value, carries_channels, carriers
 
     def __aiter__(self) -> AsyncIterator[Any]:
         return self
@@ -274,11 +282,17 @@ class Channel:
 
     # -- driven by the connection ---------------------------------------------
 
-    def _deliver(self, value: Any, size: int) -> None:
+    def _deliver(
+        self,
+        value: Any,
+        size: int,
+        carries_channels: bool,
+        carriers: list[Any] | None = None,
+    ) -> None:
         self._received_bytes += size
         if self._ended_receiving:
             return
-        self._items.append((value, size))
+        self._items.append((value, size, carries_channels, carriers))
         if self._item_arrived is not None:
             self._item_arrived.set()
 
@@ -421,6 +435,8 @@ class Connection:
         self._credit_waiting: dict[int, Channel] = {}
         #: fragments of the item in progress, by channel
         self._fragments: dict[int, list[bytes]] = {}
+        #: set by decoding an item with a channel in it
+        self._decoded_a_channel = False
         #: the other side, as warnings name it; set once the handshake is done
         self.peer = "the other side"
         self.failure: WorkerGone | None = None
@@ -473,6 +489,7 @@ class Connection:
         if code != CHANNEL_REFERENCE or type(channel_id) is not int:
             msg = f"unknown extension {code} with {channel_id!r}"
             raise DecodeError(msg)
+        self._decoded_a_channel = True
         return self._channel_for(channel_id)
 
     def _channel_for(self, channel_id: int) -> Channel:
@@ -638,7 +655,9 @@ class Connection:
             return
         channel = self._channels.get(frame.channel)
         if channel is not None:
-            channel._deliver(self.decode_value(payload), len(payload))
+            self._decoded_a_channel = False
+            value, carriers = decode_recording(payload, self._resolve_reference)
+            channel._deliver(value, len(payload), self._decoded_a_channel, carriers)
 
     def _on_control(self, value: Any) -> None:
         not_understood = unknown(value)

@@ -5,6 +5,10 @@ optionally in its own subinterpreter. The facades in the main interpreter send
 it requests and wait for the answers. Through a thread host, messages are
 Python objects; through a subinterpreter host they are encoded values, since
 no object is shared between interpreters.
+
+What a channel carries crosses as encoded values through either host, so a
+channel inside one becomes a handle the facade wraps, never the host's own
+channel object, which belongs to the host's event loop.
 """
 
 from __future__ import annotations
@@ -19,14 +23,16 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import anyio
 import anyio.abc
+import anyio.lowlevel
 import anyio.to_thread
 
 from . import _errors
+from ._channels import is_channel
 from ._errors import StateError
 from ._gateway import Group, WorkerInfo
 from ._places import Place, place_from_value
 from ._shutdown import Shutdown, Teardown
-from ._values import decode, encode
+from ._values import DecodeError, decode, encode
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -34,6 +40,10 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
 Message = tuple[Any, ...]
+
+#: the value codec's extension code for a channel handle between a facade and
+#: its host
+CHANNEL_HANDLE = 1
 
 
 class Engine:
@@ -124,6 +134,8 @@ class _Holder:
 class HostServer:
     def __init__(self) -> None:
         self._objects: dict[int, Any] = {}
+        #: the handle of each channel a value carried out, by the channel's id
+        self._handle_of: dict[int, int] = {}
         self._holders: dict[int, _Holder] = {}
         self._ids = itertools.count(1)
         self._scopes: dict[Any, anyio.CancelScope] = {}
@@ -215,8 +227,43 @@ class HostServer:
         if holder.error is not None:
             raise holder.error
 
-    async def op_send(self, channel: int, value: Any) -> None:
-        await self._objects[channel].send(value)
+    def _export(self, value: Any) -> bytes:
+        """A value for the facade: each channel in it becomes a handle."""
+        return encode(value, self._channel_handle)
+
+    def _channel_handle(self, value: Any) -> tuple[int, int]:
+        if not is_channel(value):
+            msg = f"cannot send {type(value).__qualname__} values: {value!r}"
+            raise TypeError(msg)
+        handle = self._handle_of.get(id(value))
+        if handle is None:
+            handle = self._handle_of[id(value)] = next(self._ids)
+            self._objects[handle] = value
+        return CHANNEL_HANDLE, handle
+
+    def _import(self, data: bytes) -> Any:
+        """A value from the facade: each handle in it becomes its channel."""
+        return decode(data, self._channel_of)
+
+    def _channel_of(self, code: int, handle: Any) -> Any:
+        channel = self._objects.get(handle) if code == CHANNEL_HANDLE else None
+        if not is_channel(channel):
+            msg = f"no channel has the handle {handle!r} in this engine host"
+            raise DecodeError(msg)
+        return channel
+
+    async def op_send(self, channel: int, data: bytes) -> None:
+        await self._objects[channel].send(self._import(data))
+
+    async def op_close(self, channel: int) -> None:
+        """Close a channel; one that arrived as a value is forgotten too, one
+        a block opened stays until its block is left."""
+        if channel in self._holders:
+            self._objects[channel].close()
+            return
+        value = self._objects.pop(channel)
+        self._handle_of.pop(id(value), None)
+        value.close()
 
     async def op_drain(self, channel: int, timeout: float | None) -> None:
         with anyio.fail_after(timeout):
@@ -231,13 +278,13 @@ class HostServer:
     async def op_close_receive(self, channel: int) -> None:
         self._objects[channel].close_receive()
 
-    async def op_receive(self, channel: int, timeout: float | None) -> Any:
+    async def op_receive(self, channel: int, timeout: float | None) -> bytes:
         with anyio.fail_after(timeout):
-            return await self._objects[channel].receive()
+            return self._export(await self._objects[channel].receive())
 
-    async def op_wait_closed(self, channel: int, timeout: float | None) -> Any:
+    async def op_wait_closed(self, channel: int, timeout: float | None) -> bytes:
         with anyio.fail_after(timeout):
-            return await self._objects[channel].wait_closed()
+            return self._export(await self._objects[channel].wait_closed())
 
 
 _ERRORS: dict[str, type[Exception]] = {
@@ -441,6 +488,31 @@ class Host:
             self._put((None, "cancel", (pending.request_id,)))
             raise
 
+    def export(self, value: object) -> bytes:
+        """A value for the host: each of this host's channels in it becomes
+        its handle."""
+        return encode(value, self._hosted_handle)
+
+    def _hosted_handle(self, value: object) -> tuple[int, int]:
+        if isinstance(value, HostedChannel):
+            if value._engine is not self:
+                msg = f"{value!r} belongs to another engine host"
+                raise StateError(msg)
+            return CHANNEL_HANDLE, value._handle
+        msg = f"cannot send {type(value).__qualname__} values: {value!r}"
+        raise TypeError(msg)
+
+    def import_value(self, data: bytes, wrap: Callable[[Host, int], Any]) -> Any:
+        """A value from the host, each channel in it wrapped by ``wrap``."""
+
+        def channel(code: int, handle: Any) -> Any:
+            if code != CHANNEL_HANDLE or type(handle) is not int:
+                msg = f"unknown extension {code} from the engine host"
+                raise DecodeError(msg)
+            return wrap(self, handle)
+
+        return decode(data, channel)
+
     def place(self, place: Place) -> Place | dict[str, Any]:
         """A place as it crosses into this host."""
         if self.kind == "thread":
@@ -532,16 +604,24 @@ class _AsyncHostedScope:
             await self._engine.acall("exit", self._handle)
 
 
-class AsyncHostedChannel:
+class HostedChannel:
+    """A channel kept in an engine host, reached by its handle."""
+
     def __init__(self, engine: Host, handle: int) -> None:
         self._engine = engine
         self._handle = handle
 
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {self._handle} in a {self._engine.kind} host>"
+
+
+class AsyncHostedChannel(HostedChannel):
     async def send(self, value: object) -> None:
-        await self._engine.acall("send", self._handle, value)
+        await self._engine.acall("send", self._handle, self._engine.export(value))
 
     async def receive(self) -> Any:
-        return await self._engine.acall("receive", self._handle, None)
+        data = await self._engine.acall("receive", self._handle, None)
+        return self._engine.import_value(data, AsyncHostedChannel)
 
     # sync in the async API too: queued behind everything sent before, and not
     # waited for, so the caller's loop never blocks on the host
@@ -558,7 +638,17 @@ class AsyncHostedChannel:
         self._engine.submit("close_receive", self._handle)
 
     async def wait_closed(self) -> Any:
-        return await self._engine.acall("wait_closed", self._handle, None)
+        data = await self._engine.acall("wait_closed", self._handle, None)
+        return self._engine.import_value(data, AsyncHostedChannel)
+
+    def close(self) -> None:
+        """Close a channel that arrived as a value; one a block opened closes
+        with its block."""
+        self._engine.submit("close", self._handle)
+
+    async def aclose(self) -> None:
+        self.close()
+        await anyio.lowlevel.checkpoint()
 
     def __aiter__(self) -> AsyncIterator[Any]:
         return self

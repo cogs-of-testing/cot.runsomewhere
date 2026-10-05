@@ -270,7 +270,22 @@ encode(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
 typedef struct {
     const unsigned char *p, *end;
     PyObject *ext_hook, *error;
+    /* when not NULL, every container holding an extension item at any depth
+     * is appended, innermost first, so a caller can rework those alone */
+    PyObject *carriers;
+    Py_ssize_t extensions;
 } reader;
+
+/* appends a container to the carriers when an extension item was read
+ * since `before`; passes NULL through */
+static PyObject *
+carried(reader *r, Py_ssize_t before, PyObject *container)
+{
+    if (container && r->carriers && r->extensions != before
+        && PyList_Append(r->carriers, container) < 0)
+        Py_CLEAR(container);
+    return container;
+}
 
 static PyObject *item(reader *r, int depth);
 
@@ -357,7 +372,7 @@ hashed(reader *r, PyObject *made, const char *what)
 static PyObject *
 tagged(reader *r, unsigned char tag, int depth)
 {
-    Py_ssize_t n;
+    Py_ssize_t n, before = r->extensions;
     PyObject *list, *result;
     switch (tag) {
     case 'N': Py_INCREF(Py_None); return Py_None;
@@ -401,22 +416,22 @@ tagged(reader *r, unsigned char tag, int depth)
     }
     case '[': case ']':
         if (count(r, tag == ']', &n)) return NULL;
-        return items(r, n, depth + 1);
+        return carried(r, before, items(r, n, depth + 1));
     case '(': case ')':
         if (count(r, tag == ')', &n) || !(list = items(r, n, depth + 1))) return NULL;
         result = PyList_AsTuple(list);
         Py_DECREF(list);
-        return result;
+        return carried(r, before, result);
     case '<': case 'l':
         if (count(r, tag == 'l', &n) || !(list = items(r, n, depth + 1))) return NULL;
         result = hashed(r, PySet_New(list), "unhashable set member: ");
         Py_DECREF(list);
-        return result;
+        return carried(r, before, result);
     case '>': case 'g':
         if (count(r, tag == 'g', &n) || !(list = items(r, n, depth + 1))) return NULL;
         result = hashed(r, PyFrozenSet_New(list), "unhashable set member: ");
         Py_DECREF(list);
-        return result;
+        return carried(r, before, result);
     case '{': case '}': {
         if (count(r, tag == '}', &n) || !(list = items(r, 2 * n, depth + 1))) return NULL;
         PyObject *d = PyDict_New();
@@ -427,7 +442,7 @@ tagged(reader *r, unsigned char tag, int depth)
             }
         }
         Py_DECREF(list);
-        return d;
+        return carried(r, before, d);
     }
     case EXT:
         if (r->ext_hook != Py_None) {
@@ -435,6 +450,7 @@ tagged(reader *r, unsigned char tag, int depth)
             int code = *r->p++;
             PyObject *inner = item(r, depth + 1);
             if (!inner) return NULL;
+            r->extensions++;
             result = PyObject_CallFunction(r->ext_hook, "iO", code, inner);
             Py_DECREF(inner);
             return result;
@@ -464,13 +480,14 @@ item(reader *r, int depth)
 static PyObject *
 decode(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
 {
-    if (nargs != 3) {
-        PyErr_SetString(PyExc_TypeError, "decode(data, ext_hook, error)");
+    if (nargs < 3 || nargs > 4 || (nargs == 4 && !PyList_CheckExact(args[3]))) {
+        PyErr_SetString(PyExc_TypeError, "decode(data, ext_hook, error, carriers: list = None)");
         return NULL;
     }
     Py_buffer view;
     if (PyObject_GetBuffer(args[0], &view, PyBUF_SIMPLE) < 0) return NULL;
-    reader r = {view.buf, (const unsigned char *)view.buf + view.len, args[1], args[2]};
+    reader r = {view.buf, (const unsigned char *)view.buf + view.len, args[1], args[2],
+                nargs == 4 ? args[3] : NULL, 0};
     PyObject *v = item(&r, 0);
     if (v && r.p != r.end) {
         PyErr_Format(r.error, "%zd trailing bytes", (Py_ssize_t)(r.end - r.p));
@@ -486,7 +503,7 @@ static PyMethodDef methods[] = {
     {"encode", (PyCFunction)(void (*)(void))encode, METH_FASTCALL,
      "encode(value, default=None) -> bytes"},
     {"decode", (PyCFunction)(void (*)(void))decode, METH_FASTCALL,
-     "decode(data, ext_hook, error) -> value"},
+     "decode(data, ext_hook, error, carriers=None) -> value"},
     {NULL, NULL, 0, NULL},
 };
 
@@ -494,7 +511,9 @@ static int
 exec_module(PyObject *module)
 {
     return PyModule_AddIntConstant(module, "FORMAT", FORMAT) < 0
-           || PyModule_AddIntConstant(module, "MAX_DEPTH", MAX_DEPTH) < 0 ? -1 : 0;
+           || PyModule_AddIntConstant(module, "MAX_DEPTH", MAX_DEPTH) < 0
+           /* decode takes a list to record carriers in */
+           || PyModule_AddIntConstant(module, "RECORDS_CARRIERS", 1) < 0 ? -1 : 0;
 }
 
 static PyModuleDef_Slot slots[] = {

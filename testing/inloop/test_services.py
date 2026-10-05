@@ -119,3 +119,47 @@ async def test_a_client_for_a_service_not_offered_is_a_state_error():
         with pytest.raises(rsh.StateError, match=re.escape("rsh_test_services.echo")):
             async with gateway.open(Echo):
                 pass
+
+
+async def test_a_sync_handler_gets_channels_received_as_values_with_the_sync_api():
+    def reply_on(channel):
+        received = channel.receive()
+        (nested,) = received["nested"][0]
+        ((keyed,),) = received["keys"]
+        for other in (received["first"], nested, *keyed):
+            other.send(type(other).__name__)
+        return "replied"
+
+    async with open_inloop(services={"t.reply_on": reply_on}) as gateway:
+        async with gateway.open("t.reply_on") as channel:
+            first, second, third = channel.new(), channel.new(), channel.new()
+            # a frozenset as a dict key: rebuilt, and its dict changed in place
+            await channel.send(
+                {
+                    "first": first,
+                    "nested": [(second,)],
+                    "keys": {(frozenset({third}),): "x"},
+                }
+            )
+            with anyio.fail_after(5):
+                for other in (first, second, third):
+                    assert await other.receive() == "ThreadChannel"
+                assert await channel.wait_closed() == "replied"
+            for other in (first, second, third):
+                other.close()
+
+
+async def test_a_sync_handler_sends_channels_inside_values_as_they_are():
+    def hand_out(channel):
+        side = channel.new()
+        channel.send({"side": [side]})
+        side.send("from the side")
+        side.close()
+        return "handed out"
+
+    async with open_inloop(services={"t.hand_out": hand_out}) as gateway:
+        async with gateway.open("t.hand_out") as channel:
+            with anyio.fail_after(5):
+                (side,) = (await channel.receive())["side"]
+                assert await side.receive() == "from the side"
+                assert await channel.wait_closed() == "handed out"

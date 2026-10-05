@@ -113,8 +113,17 @@ builtin `TimeoutError`.
 
 A sync facade needs an engine host: the core has to run on some loop, and the
 caller's thread is not one. Client classes are written once, async, and the
-facade wraps them, running each method in the host: `gateway.open(Agent)` on
-the sync facade yields the sync wrapper.
+facade wraps them: `gateway.open(Agent)` on the sync facade yields the sync
+wrapper. The client's own code runs in an event loop of its own, opened with
+the client and closed with it, so a method may take a lock or return an async
+context manager (`rx.run`), which the wrapper enters and leaves as a sync one.
+Its channel calls go to the engine host like any other.
+
+A channel that arrives as a value, received or returned as a result, crosses
+the facade as a handle and is wrapped with the facade's own channel API, sync
+or async; the host's channel object never leaves the host. Sending such a
+channel on, over another channel of the same host, hands the host its own
+object back.
 
 Calling the sync facade from inside a running event loop would stall that
 loop, so it refuses, with a `StateError` that names the async API instead.
