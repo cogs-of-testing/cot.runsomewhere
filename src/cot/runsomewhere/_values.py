@@ -378,6 +378,16 @@ def _load_speedups() -> Any:
 #: the C codec in use, or None for the pure-Python one
 speedups = _load_speedups()
 
+
+def py_decode_recording(
+    data: bytes, ext_hook: ExtHook | None = None
+) -> tuple[Any, list[Any] | None]:
+    """The value, and no record: the pure codec does not record carriers."""
+    return py_decode(data, ext_hook), None
+
+
+decode_recording = py_decode_recording
+
 if speedups is None:
     encode = py_encode
     decode = py_decode
@@ -393,3 +403,13 @@ else:
     def decode(data: bytes, ext_hook: ExtHook | None = None) -> Any:
         """Decode one value; raise DecodeError for anything malformed."""
         return _c_decode(data, ext_hook, DecodeError)
+
+    if getattr(speedups, "RECORDS_CARRIERS", 0):
+
+        def decode_recording(
+            data: bytes, ext_hook: ExtHook | None = None
+        ) -> tuple[Any, list[Any] | None]:
+            """The value, and every container in it holding an extension item
+            at any depth, innermost first."""
+            carriers: list[Any] = []
+            return _c_decode(data, ext_hook, DecodeError, carriers), carriers

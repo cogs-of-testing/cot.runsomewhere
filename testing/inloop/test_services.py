@@ -125,20 +125,28 @@ async def test_a_sync_handler_gets_channels_received_as_values_with_the_sync_api
     def reply_on(channel):
         received = channel.receive()
         (nested,) = received["nested"][0]
-        for other in (received["first"], nested):
+        ((keyed,),) = received["keys"]
+        for other in (received["first"], nested, *keyed):
             other.send(type(other).__name__)
         return "replied"
 
     async with open_inloop(services={"t.reply_on": reply_on}) as gateway:
         async with gateway.open("t.reply_on") as channel:
-            first, second = channel.new(), channel.new()
-            await channel.send({"first": first, "nested": [(second,)]})
+            first, second, third = channel.new(), channel.new(), channel.new()
+            # a frozenset as a dict key: rebuilt, and its dict changed in place
+            await channel.send(
+                {
+                    "first": first,
+                    "nested": [(second,)],
+                    "keys": {(frozenset({third}),): "x"},
+                }
+            )
             with anyio.fail_after(5):
-                assert await first.receive() == "ThreadChannel"
-                assert await second.receive() == "ThreadChannel"
+                for other in (first, second, third):
+                    assert await other.receive() == "ThreadChannel"
                 assert await channel.wait_closed() == "replied"
-            first.close()
-            second.close()
+            for other in (first, second, third):
+                other.close()
 
 
 async def test_a_sync_handler_sends_channels_inside_values_as_they_are():
