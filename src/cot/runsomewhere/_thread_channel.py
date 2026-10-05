@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 import anyio.from_thread
 
+from ._channels import is_channel
 from ._errors import ChannelClosed
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ class ThreadChannel:
             with anyio.fail_after(timeout):
                 return await self.async_channel.receive()
 
-        return anyio.from_thread.run(receive)
+        return _for_thread(anyio.from_thread.run(receive))
 
     def __iter__(self) -> Iterator[Any]:
         try:
@@ -55,7 +56,7 @@ class ThreadChannel:
             with anyio.fail_after(timeout):
                 return await self.async_channel.wait_closed()
 
-        return anyio.from_thread.run(wait)
+        return _for_thread(anyio.from_thread.run(wait))
 
     def drain(self, timeout: float | None = None) -> None:
         self._raise_if_detached()
@@ -96,3 +97,20 @@ class ThreadChannel:
 
     def close(self) -> None:
         anyio.from_thread.run_sync(self.async_channel.close)
+
+
+_SCALARS = (type(None), bool, int, float, complex, str, bytes)
+
+
+def _for_thread(value: Any) -> Any:
+    """A received value with each channel in it given the sync API: the
+    connection decodes items before it knows who takes them."""
+    if isinstance(value, _SCALARS):
+        return value
+    if is_channel(value) and not isinstance(value, ThreadChannel):
+        return ThreadChannel(value)
+    if isinstance(value, dict):
+        return {_for_thread(key): _for_thread(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return type(value)(map(_for_thread, value))
+    return value

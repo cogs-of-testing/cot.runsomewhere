@@ -119,3 +119,23 @@ async def test_a_client_for_a_service_not_offered_is_a_state_error():
         with pytest.raises(rsh.StateError, match=re.escape("rsh_test_services.echo")):
             async with gateway.open(Echo):
                 pass
+
+
+async def test_a_sync_handler_gets_channels_received_as_values_with_the_sync_api():
+    def reply_on(channel):
+        received = channel.receive()
+        (nested,) = received["nested"][0]
+        for other in (received["first"], nested):
+            other.send(type(other).__name__)
+        return "replied"
+
+    async with open_inloop(services={"t.reply_on": reply_on}) as gateway:
+        async with gateway.open("t.reply_on") as channel:
+            first, second = channel.new(), channel.new()
+            await channel.send({"first": first, "nested": [(second,)]})
+            with anyio.fail_after(5):
+                assert await first.receive() == "ThreadChannel"
+                assert await second.receive() == "ThreadChannel"
+                assert await channel.wait_closed() == "replied"
+            first.close()
+            second.close()

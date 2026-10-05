@@ -14,11 +14,15 @@ def double(channel, value):
     return value * 2
 
 
-# async: a sync function would get the received channel unwrapped for its
-# thread, which is a worker-side matter, not the facades'
 async def say_via(channel):
     other = await channel.receive()
     await other.send("via")
+    return "sent"
+
+
+def say_via_from_a_thread(channel):
+    other = channel.receive()
+    other.send("via")
     return "sent"
 
 
@@ -64,7 +68,8 @@ def test_remote_exec_runs_through_the_sync_facade(engine):
                     assert channel.wait_closed(timeout=5) == 4
 
 
-def test_a_received_channel_can_be_sent_on_through_the_sync_facade(engine):
+@pytest.mark.parametrize("say_via", [say_via, say_via_from_a_thread])
+def test_a_received_channel_can_be_sent_on_through_the_sync_facade(engine, say_via):
     with rsh.use_engine(engine), rsh.sync.open_group() as group:
         with group.spawn(rsht.InLoop(), services=REMOTE_EXEC) as gateway:
             with gateway.open(rsh.RemoteExec) as rx:
