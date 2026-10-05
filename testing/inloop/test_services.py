@@ -139,3 +139,19 @@ async def test_a_sync_handler_gets_channels_received_as_values_with_the_sync_api
                 assert await channel.wait_closed() == "replied"
             first.close()
             second.close()
+
+
+async def test_a_sync_handler_sends_channels_inside_values_as_they_are():
+    def hand_out(channel):
+        side = channel.new()
+        channel.send({"side": [side]})
+        side.send("from the side")
+        side.close()
+        return "handed out"
+
+    async with open_inloop(services={"t.hand_out": hand_out}) as gateway:
+        async with gateway.open("t.hand_out") as channel:
+            with anyio.fail_after(5):
+                (side,) = (await channel.receive())["side"]
+                assert await side.receive() == "from the side"
+                assert await channel.wait_closed() == "handed out"
