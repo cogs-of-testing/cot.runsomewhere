@@ -1,6 +1,6 @@
 [build-system]
 build-backend = "hatchling.build"
-requires = [ "hatch-vcs", "hatchling" ]
+requires = [ "hatch-vcs", "hatchling", "vcs-versioning>=2.6" ]
 
 [project]
 name = "cot.runsomewhere"
@@ -64,6 +64,7 @@ bench = [ "pytest-benchmark>=5" ]
 
 [tool.hatch]
 version.source = "vcs"
+version.raw-options.version_scheme = "towncrier-fragments-zerover"
 version.raw-options.fallback_version = "0.0.0"
 build.targets.wheel.packages = [ "src/cot" ]
 
@@ -143,3 +144,52 @@ warn_unreachable = true
 enable_error_code = [ "ignore-without-code", "redundant-expr", "truthy-bool" ]
 # optional, built from speedups/, and absent where mypy runs
 overrides = [ { module = "_cot_runsomewhere_speedups", ignore_missing_imports = true } ]
+
+[tool.towncrier]
+directory = "changelog.d"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+template = "changelog.d/template.md"
+title_format = "## {version} ({project_date})"
+issue_format = "[#{issue}](https://github.com/cogs-of-testing/cot.runsomewhere/issues/{issue})"
+underlines = [ "", "", "" ]
+
+[[tool.towncrier.type]]
+directory = "major"
+name = "Major Changes"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "breaking"
+name = "Breaking Changes"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removal"
+name = "Removed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "deprecation"
+name = "Deprecated"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "feature"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "bugfix"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "doc"
+name = "Documentation"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "misc"
+name = "Miscellaneous"
+showcontent = true

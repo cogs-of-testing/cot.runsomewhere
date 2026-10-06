@@ -1,0 +1,55 @@
+name: Release tag
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  tag:
+    # only the PR that release-proposal.yml opened
+    if: >-
+      github.event.pull_request.merged &&
+      github.event.pull_request.head.ref == 'release/main' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # creates the tag and the GitHub release
+      actions: write  # starts release.yml on the tag
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      # The version is the newest section of the rendered changelog in the
+      # merged tree, not the PR title, which anyone can edit.
+      - name: Read the version and notes from CHANGELOG.md
+        id: version
+        run: |
+          version=$(grep -m1 -oE '^## [0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md | cut -c4-)
+          if [ -z "$version" ]; then
+            echo "::error::no version section in CHANGELOG.md"
+            exit 1
+          fi
+          awk -v v="## $version" 'index($0, v) == 1 {on = 1; next} on && /^## / {exit} on' \
+            CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # A tag created with GITHUB_TOKEN does not trigger `push: tags`, so the
+      # release workflow is started explicitly. Re-running this job reuses an
+      # existing release.
+      - name: Tag, create the release and start release.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! gh release view "v$VERSION" > /dev/null 2>&1; then
+            gh release create "v$VERSION" --target "$SHA" --title "v$VERSION" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          gh workflow run release.yml --ref "v$VERSION"

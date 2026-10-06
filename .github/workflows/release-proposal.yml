@@ -1,0 +1,80 @@
+name: Release proposal
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # force-pushes release/main
+      pull-requests: write  # opens or updates the release PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # the next version is computed from the last tag
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: false
+
+      # towncrier-fragments-zerover reads the fragment types in changelog.d/;
+      # without fragments there is nothing to release.
+      - name: Determine the next version
+        id: version
+        run: |
+          shopt -s nullglob
+          fragments=(changelog.d/*.*.md)
+          if [ "${#fragments[@]}" -eq 0 ]; then
+            echo "has_fragments=false" >> "$GITHUB_OUTPUT"
+            echo "No changelog fragments, nothing to propose." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          version=$(uv run --no-project --with hatchling --with hatch-vcs \
+            --with "vcs-versioning>=2.6" hatchling version \
+            | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+          if [ -z "$version" ]; then
+            echo "::error::could not determine the next version"
+            exit 1
+          fi
+          echo "has_fragments=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Next release: v$version from ${#fragments[@]} fragment(s)." >> "$GITHUB_STEP_SUMMARY"
+
+      # On pull requests this only checks that the fragments render.
+      - name: Render the changelog
+        if: steps.version.outputs.has_fragments == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: uvx --from "towncrier>=24" towncrier build --yes --version "$VERSION"
+
+      - name: Push release/main and open the release PR
+        if: github.event_name == 'push' && steps.version.outputs.has_fragments == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B release/main
+          git add -A
+          git commit -m "Release v$VERSION"
+          git push --force "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" release/main
+          body="Renders the changelog fragments into CHANGELOG.md for v$VERSION.
+          Merging this tags v$VERSION on the merge commit and publishes it to PyPI.
+          Pushing more fragments to main updates this PR."
+          pr=$(gh pr list --head release/main --base main --state open --json number --jq '.[0].number')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "Release v$VERSION" --body "$body"
+          else
+            gh pr create --head release/main --base main --title "Release v$VERSION" --body "$body"
+          fi

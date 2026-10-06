@@ -3,11 +3,15 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # started by release-tag.yml, whose tag does not trigger `push`
+  workflow_dispatch:
 
 permissions: {}
 
 jobs:
   build:
+    # a dispatch on a branch would build a dev version
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
