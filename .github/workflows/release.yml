@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # hatch-vcs derives the version from tags
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          python-version: "3.14"
+          # A release builds from a clean slate: a restored cache is one more
+          # thing that could influence what ends up on PyPI.
+          enable-cache: false
+
+      # The tag is what the version comes from, so a release must not ship a
+      # tree that fails its own suite.
+      - run: uv run --frozen pytest -q
+
+      - run: uv build
+
+      # A wheel that cannot be imported from a clean environment is the one
+      # failure mode the test suite cannot see.
+      - name: smoke-test the built wheel
+        run: |
+          uv run --isolated --no-project --with dist/*.whl \
+            python -c "import cot.runsomewhere; print(cot.runsomewhere.__name__)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI trusted publishing
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
