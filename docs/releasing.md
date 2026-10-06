@@ -23,8 +23,9 @@ PyPI knows this repository as the publisher of `cot-runsomewhere`:
    "Release vX.Y.Z" from `release/main`
    (`.github/workflows/release-proposal.yml`): the fragments rendered into
    `CHANGELOG.md` by towncrier, the version from
-   `towncrier-fragments-zerover`. CI does not run on that pull request,
-   because GitHub does not start workflows for one opened by `GITHUB_TOKEN`.
+   `towncrier-fragments-zerover`. GitHub holds CI on that pull request as
+   "action required" because `GITHUB_TOKEN` opened it; approve the runs
+   from the pull request to get checks.
 3. Merging it creates the tag `vX.Y.Z` and the GitHub release on the merge
    commit and starts `release.yml` on the tag
    (`.github/workflows/release-tag.yml`).
